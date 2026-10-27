@@ -1,7 +1,7 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.9.0` · **Branch:** `main` · **Commits:** 13
+**Version:** `0.9.0` · **Branch:** `main` · **Commits:** 14
 **Size:** 52 Go files (31 source, 21 test), ~8,900 lines including tests, 162 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
@@ -845,6 +845,7 @@ reports evidence; it does not weaponise it.
 | `ecf3b5c` | docs: record the RE2 nested-repeat limitation | trap 13 |
 | `483c8fa` | fix(redirect): detect every backslash payload style | five payloads; backslashes folded before parsing |
 | `2b7e85b` | feat(reflect): detect stored reflection with an opt-in second pass | `-stored`, `Submit`/`Analyze`, observation re-fetch |
+| `a2b25f2` | feat: add depth-one crawl and custom wordlists | `internal/crawl`, `-crawl`/`-max-pages`, `-wordlist` with a 200-entry cap |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
