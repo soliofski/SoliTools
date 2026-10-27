@@ -22,8 +22,10 @@ func Rules() []*Rule {
 			Category:    "Private Key",
 			Description: "PEM-encoded private key material",
 			Base:        95,
-			Pattern:     `(?s)-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+?)-----END ([A-Z0-9 ]*PRIVATE KEY)-----`,
-			Group:       2,
+			// The body class also allows a backslash, because a key pasted into
+			// JSON arrives as "-----BEGIN …\n…-----END" with escaped newlines.
+			Pattern: `(?s)-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([A-Za-z0-9+/=\s\\]+?)-----END ([A-Z0-9 ]*PRIVATE KEY)-----`,
+			Group:   2,
 			// A header/footer pair alone appears in documentation and in code
 			// that parses keys; only a body that base64-decodes to real DER
 			// material is treated as key material.
@@ -196,6 +198,44 @@ func Rules() []*Rule {
 			EntropyMin:  4.0,
 		},
 		{
+			ID:          "secret.discord-webhook",
+			Title:       "Discord Webhook URL",
+			Category:    "Discord",
+			Description: "Discord webhook endpoint, which accepts messages without further authentication",
+			Base:        90,
+			Pattern:     `https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}`,
+			EntropyMin:  3.0,
+		},
+		{
+			ID:          "secret.telegram-bot-token",
+			Title:       "Telegram Bot Token",
+			Category:    "Telegram",
+			Description: "Telegram bot API token (bot id and secret)",
+			Base:        85,
+			Pattern:     `\b\d{8,10}:[A-Za-z0-9_-]{35}\b`,
+			MinLen:      44,
+			MaxLen:      46,
+			EntropyMin:  3.5,
+		},
+		{
+			ID:       "secret.azure-sas-token",
+			Title:    "Azure SAS Token",
+			Category: "Azure",
+			// A signature only matters with the parameters that scope it, so the
+			// pattern requires the SAS version stamp in front and captures the
+			// signature; matching a bare ?sig= would hit every HMAC on the web.
+			// The parameter run is a flat character class: RE2 refuses a counted
+			// repetition nested inside another one.
+			Description: "Azure Storage shared access signature",
+			Base:        72,
+			Pattern:     `[?&]sv=\d{4}-\d{2}-\d{2}[A-Za-z0-9%._~+/=&:-]{0,512}?sig=([A-Za-z0-9%+/=_.~-]{20,200})`,
+			Group:       1,
+			MinLen:      20,
+			MaxLen:      200,
+			EntropyMin:  4.0,
+			Validate:    validateSAS,
+		},
+		{
 			ID:          "secret.jwt",
 			Title:       "JSON Web Token",
 			Category:    "JWT",
@@ -236,6 +276,15 @@ func Rules() []*Rule {
 	}
 }
 
+// pemEscapes removes the literal escape sequences a JSON-encoded PEM carries in
+// place of line breaks. A real PEM body never contains a backslash, so this is a
+// no-op for the common case.
+var pemEscapes = strings.NewReplacer(
+	`\n`, "",
+	`\r`, "",
+	`\t`, "",
+)
+
 // requirePEMBlock accepts a PEM block only when the BEGIN and END labels agree
 // and the body decodes to plausible DER material.
 func requirePEMBlock(full, payload string) bool {
@@ -245,7 +294,7 @@ func requirePEMBlock(full, payload string) bool {
 		return false
 	}
 
-	body := stripSpaces(payload)
+	body := pemEscapes.Replace(stripSpaces(payload))
 	if len(body) < 64 {
 		return false
 	}
@@ -254,6 +303,27 @@ func requirePEMBlock(full, payload string) bool {
 		return false
 	}
 	return len(der) >= 64
+}
+
+// validateSAS adds confidence when other SAS parameters accompany the
+// signature: a version stamp alone could be anything, but sv= plus sp= or se=
+// is unmistakably a storage SAS.
+func validateSAS(full, _ string) (confidence.Signal, bool) {
+	lower := strings.ToLower(full)
+	markers := 0
+	for _, marker := range []string{"&sp=", "&se=", "&ss=", "&srt=", "&spr=", "&si="} {
+		if strings.Contains(lower, marker) {
+			markers++
+		}
+	}
+	if markers == 0 {
+		return confidence.Signal{}, false
+	}
+	return confidence.Signal{
+		Name:   "structural",
+		Delta:  8,
+		Reason: "signature is scoped by additional SAS parameters",
+	}, true
 }
 
 // pemLabel returns the text between marker and the next "-----".

@@ -126,10 +126,7 @@ func (s *Scanner) Scan(document Document) Result {
 			if rule.RedactFullMatch {
 				// Only the header is legible; the body is key material and must
 				// never reach a report, masked or not.
-				value = full
-				if newline := strings.IndexByte(value, '\n'); newline >= 0 {
-					value = value[:newline]
-				}
+				value = blockHeader(full)
 			}
 
 			// For a block format the context is clamped to the header line:
@@ -138,10 +135,7 @@ func (s *Scanner) Scan(document Document) Result {
 			contextLimit := len(text)
 			if rule.RedactFullMatch {
 				contextStart = loc[0]
-				contextEnd = loc[0] + len(full)
-				if newline := strings.IndexByte(full, '\n'); newline >= 0 {
-					contextEnd = loc[0] + newline
-				}
+				contextEnd = loc[0] + len(blockHeader(full))
 				contextLimit = contextEnd
 			}
 
@@ -233,6 +227,19 @@ func overlapsAny(c candidate, others []candidate) bool {
 		}
 	}
 	return false
+}
+
+// blockHeader returns the first line of a block, treating a JSON-escaped "\n"
+// as a line break too: everything past it is key material.
+func blockHeader(block string) string {
+	end := len(block)
+	if newline := strings.IndexByte(block, '\n'); newline >= 0 && newline < end {
+		end = newline
+	}
+	if escaped := strings.Index(block, `\n`); escaped >= 0 && escaped < end {
+		end = escaped
+	}
+	return block[:end]
 }
 
 // gate applies a rule's hard structural requirements. An empty result means the

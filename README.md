@@ -165,7 +165,7 @@ Rules must encode provider identity: a reserved prefix (`ghp_`, `sk_live_`,
 
 | Category | Rule | Base | Hard requirements |
 | --- | --- | --- | --- |
-| Private Key | `secret.private-key` | 95 | PEM body must base64-decode to ≥ 64 bytes of DER |
+| Private Key | `secret.private-key` | 95 | PEM body must base64-decode to ≥ 64 bytes of DER; raw **or** JSON-escaped newlines |
 | AWS | `secret.aws-access-key-id` | 85 | prefix + 16 chars, entropy ≥ 3.0 |
 | GitHub | `secret.github-token` | 90 | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 36, entropy ≥ 3.5 |
 | GitHub | `secret.github-fine-grained-pat` | 90 | `github_pat_` structure, entropy ≥ 3.5 |
@@ -180,6 +180,9 @@ Rules must encode provider identity: a reserved prefix (`ghp_`, `sk_live_`,
 | SendGrid | `secret.sendgrid-api-key` | 85 | `SG.` structure, entropy ≥ 3.5 |
 | Twilio | `secret.twilio-api-key` | 70 | `SK` + 32 hex, entropy ≥ 2.5 |
 | Azure | `secret.azure-storage-key` | 85 | `AccountKey=` + 86–90 base64, entropy ≥ 4.0 |
+| Azure | `secret.azure-sas-token` | 72 | `sv=<date>` … `sig=`, +8 when scoped by `sp=`/`se=`/`srt=` |
+| Discord | `secret.discord-webhook` | 90 | `discord.com/api/webhooks/<id>/<token>`, entropy ≥ 3.0 |
+| Telegram | `secret.telegram-bot-token` | 85 | 8–10 digit bot id `:` 35 chars, entropy ≥ 3.5 |
 | JWT | `secret.jwt` | 55 | header segment must decode to JSON with `alg` (+10) |
 | Generic Secret | `secret.generic-assignment` | 50 | keyword assignment, entropy ≥ 3.2, −10 generic |
 | Generic Secret | `secret.generic-high-entropy` | 40 | 40–64 char random string, −10 generic |

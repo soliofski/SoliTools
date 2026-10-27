@@ -23,7 +23,7 @@ import (
 	"solitools/internal/term"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

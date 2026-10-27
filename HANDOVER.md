@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.6.0` · **Branch:** `main` · **Commits:** 7
-**Size:** 46 Go files, ~6,800 lines, 128 test functions, 18 secret rules, zero external dependencies.
+**Version:** `0.7.0` · **Branch:** `main` · **Commits:** 8
+**Size:** 46 Go files, ~6,800 lines, 129 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -458,7 +458,7 @@ serialises into JSON as-is, which is what makes a report auditable.
 ### 8.1 `secret` — the accuracy-critical one
 
 Entry point: `secret.New()` then `Scanner.Scan(Document{Source, Body})`.
-18 rules live in `internal/secret/rules.go`; the engine is `scanner.go`.
+21 rules live in `internal/secret/rules.go`; the engine is `scanner.go`.
 
 ```mermaid
 flowchart TD
@@ -476,12 +476,23 @@ flowchart TD
 
 Rules worth understanding before you touch them:
 
+PEM detection accepts a raw block and the JSON-escaped form
+(`"----BEGIN…\n…----"`): the body class allows a backslash, `requirePEMBlock`
+strips `\n`/`\r`/`\t` before decoding, and `blockHeader` cuts the reported value
+at either a real or an escaped newline so the body never reaches a report.
+Azure SAS is the context-dependent one: a bare `?sig=` is meaningless, so the
+pattern demands the `sv=<date>` stamp first, and `Validate` adds confidence when
+`sp=`/`se=`/`srt=` show the signature is scoped.
+
 | Rule | Base | Why it is safe from false positives |
 |------|------|-------------------------------------|
 | `secret.private-key` | 95 | body must base64-decode to ≥ 64 bytes of DER; header/footer must match |
 | `secret.aws-access-key-id` | 85 | reserved 4-char prefix + exactly 16 uppercase alphanumerics |
 | `secret.github-token` | 90 | `ghp_`-style prefix + exactly 36 characters |
 | `secret.stripe-live-key` | 90 | `sk_live_` / `rk_live_` + 24–247 alphanumerics |
+| `secret.azure-sas-token` | 72 | needs `sv=<date>` before the `sig=` it captures; +8 when `sp=`/`se=`/`srt=` prove the scope |
+| `secret.discord-webhook` | 90 | fixed host + 17–20 digit id + 60–80 char token |
+| `secret.telegram-bot-token` | 85 | 8–10 digit id, colon, exactly 35 characters |
 | `secret.jwt` | 55 | header segment must decode to JSON with `alg` (adds +10) |
 | `secret.generic-assignment` | 50 | keyword assignment; −10 generic keeps it at 40, below the threshold |
 | `secret.generic-high-entropy` | 40 | bare random string; −10 generic → 30, effectively opt-in via `-all` |
@@ -622,11 +633,11 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-128 test functions. The distribution matters more than the number:
+129 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
-| `secret` (20) | every rule positive, plus explicit false-positive regressions |
+| `secret` (21) | every rule positive, plus explicit false-positive regressions |
 | `report` (16) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
 | `term` (11) | mode precedence, palette mapping, width parsing |
 | `cmd` (14) | exit codes, flags, JSON schema, quiet, colour, form opt-in |
@@ -707,10 +718,10 @@ hosts.
 |----------|------|--------------------------|
 | done | ~~POST and form parameters~~ | Shipped in 0.5.0 as `-forms`: forms parsed, GET forms folded into the URL path, POST probing opt-in with same-origin and destructive filters. |
 | done | ~~SARIF output~~ | Shipped in 0.6.0 as `-sarif`. |
-| 1 | **More secret rules** | JSON-escaped PEM (`"-----BEGIN…\n…"`), plus providers people actually leak (Azure SAS, Discord webhooks, Telegram bot tokens). Follow the recipe in §12. |
-| 2 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
-| 3 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
-| 4 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| done | ~~More secret rules~~ | Shipped in 0.7.0: JSON-escaped PEM, Discord webhooks, Telegram bot tokens, Azure SAS. |
+| 1 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
+| 2 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
+| 3 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.

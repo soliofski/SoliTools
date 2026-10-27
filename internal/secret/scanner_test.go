@@ -80,6 +80,9 @@ func TestVendorTokenRules(t *testing.T) {
 		{"sendgrid key", "SG." + seq(22, alphaNum, 29) + "." + seq(43, alphaNum, 29), "secret.sendgrid-api-key", "SendGrid"},
 		{"twilio api key", "SK" + seq(32, hexLower, 11), "secret.twilio-api-key", "Twilio"},
 		{"azure storage key", "AccountKey=" + seq(88, alphaNum, 29), "secret.azure-storage-key", "Azure"},
+		{"discord webhook", "https://discord.com/api/webhooks/123456789012345678/" + seq(70, alphaNumDash, 29), "secret.discord-webhook", "Discord"},
+		{"telegram bot token", "123456789:" + seq(35, alphaNum, 29), "secret.telegram-bot-token", "Telegram"},
+		{"azure sas token", "https://acct.blob.core.windows.net/c/f.txt?sv=2022-11-02&ss=b&srt=sco&sp=rl&se=2026-01-01T00:00:00Z&sig=" + seq(43, alphaNum, 29), "secret.azure-sas-token", "Azure"},
 	}
 
 	for _, c := range cases {
@@ -134,6 +137,29 @@ func TestPrivateKeyRule(t *testing.T) {
 		}
 		if strings.Contains(f.Context, "MII") {
 			t.Fatal("context leaks key material")
+		}
+	})
+
+	t.Run("json-escaped key block", func(t *testing.T) {
+		// A key pasted into a JSON document keeps escaped newlines, which the
+		// old body class refused to match.
+		block := testPrivateKeyPEM(t)
+		escaped := strings.ReplaceAll(block, "\n", `\n`)
+		body := `{"private_key":"` + escaped + `"}`
+
+		result := scanner.Scan(Document{Source: "https://target.test/config.json", Body: []byte(body)})
+		if len(result.Findings) != 1 {
+			t.Fatalf("findings = %d, want 1 (reasons %+v)", len(result.Findings), result.ByReason)
+		}
+		found := result.Findings[0]
+		if found.RuleID != "secret.private-key" {
+			t.Fatalf("rule = %q", found.RuleID)
+		}
+		if found.Value != "-----BEGIN RSA PRIVATE KEY-----" {
+			t.Fatalf("value = %q, want the header only", found.Value)
+		}
+		if strings.Contains(found.Context, "MII") {
+			t.Fatalf("context leaks escaped key material: %q", found.Context)
 		}
 	})
 
@@ -309,6 +335,43 @@ func TestMask(t *testing.T) {
 	masked := Mask("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
 	if masked != "-----BEGIN RSA PRIVATE KEY-----" {
 		t.Errorf("Mask(PEM) = %q", masked)
+	}
+}
+
+func TestNewRuleFalsePositives(t *testing.T) {
+	scanner := newScanner(t)
+
+	cases := []struct {
+		name string
+		body string
+		rule string
+	}{
+		{
+			"webhook path on another host",
+			`https://example.com/api/webhooks/123456789012345678/` + seq(70, alphaNumDash, 29),
+			"secret.discord-webhook",
+		},
+		{
+			"bare signature without a SAS version",
+			`https://target.test/cb?state=1&sig=` + seq(43, alphaNum, 29),
+			"secret.azure-sas-token",
+		},
+		{
+			"telegram-shaped but too short",
+			`build 12345678:shortlog`,
+			"secret.telegram-bot-token",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(c.body)})
+			for _, found := range result.Findings {
+				if found.RuleID == c.rule {
+					t.Fatalf("%s matched %q: %+v", c.rule, c.body, found)
+				}
+			}
+		})
 	}
 }
 
