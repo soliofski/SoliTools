@@ -542,19 +542,24 @@ script, JSON and plain text. It is the most testable part; use it directly.
 
 ### 8.5 `redirect` — verification, not reflection
 
-Only redirect-specific parameter names are probed (`IsRedirectParam`). Three
-payload styles (`https://`, `//`, `/\`) point at `example.com`, which is
-reserved by RFC 2606 and never contacted — only the `Location` header is read.
-A relative redirect is normal behaviour and is never reported.
+Only redirect-specific parameter names are probed (`IsRedirectParam`). Five
+payload styles (`https://`, `//`, and the backslash-mangled `/\`, `\/`, `\\`)
+point at `example.com`, which is reserved by RFC 2606 and never contacted — only
+the `Location` header is read. A relative redirect is normal behaviour and is
+never reported.
 
-`normalizeLocation` handles the backslash family: browsers read `\` as `/` in
-the authority position, so `/\host`, `\/host` and `\\host` are all `//host`.
-Without that normalisation, a server that echoes the backslash payload produces
-a `Location` Go parses as a relative path with an empty host, and the module
-silently misses a real open redirect. A **single** leading slash must stay a
-path — normalising it would make every internal redirect look external — and a
-UNC-style `\\server\share` path must still fail to parse as a host. Both cases
-are pinned in `TestLeavesSite`.
+`normalizeLocation` folds every backslash to a slash before parsing, because a
+browser does exactly that everywhere in a special-scheme URL. In the authority
+position `/[backslash]host`, `[backslash]/host` and `[backslash][backslash]host`
+are all `//host`; without the fold a server that echoes one of them produces a
+`Location` Go parses as a relative path with an empty host and the module
+silently misses a real open redirect. Folding also rescues `//host[backslash]path`,
+where the backslash is a path separator to a browser but an illegal host-name
+character to `url.Parse`. A **single** leading slash or backslash must stay a
+path — normalising either would make every internal redirect look external — and
+a UNC-style `[backslash][backslash]server[backslash]share` path must still fail
+the host check. All of it is pinned in `TestLeavesSite`, and
+`TestProbeDetectsEachPayloadStyle` proves every payload style end to end.
 
 ### 8.7 `form` — parameters hidden in markup
 

@@ -2,6 +2,7 @@ package redirect
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -158,6 +159,63 @@ func TestIsRedirectParam(t *testing.T) {
 	}
 }
 
+func TestPayloadsCoverEveryBackslashStyle(t *testing.T) {
+	payloads := Payloads()
+	if len(payloads) != 5 {
+		t.Fatalf("Payloads() has %d entries, want 5", len(payloads))
+	}
+	seen := map[string]bool{}
+	for _, payload := range payloads {
+		if !strings.Contains(payload, canaryHost+canaryPath) {
+			t.Errorf("payload %q does not target the canary", payload)
+		}
+		if seen[payload] {
+			t.Errorf("payload %q is duplicated", payload)
+		}
+		seen[payload] = true
+	}
+	for _, prefix := range []string{`/\`, `\/`, `\\`} {
+		matched := false
+		for _, payload := range payloads {
+			if strings.HasPrefix(payload, prefix) {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Errorf("no payload starts with %q", prefix)
+		}
+	}
+}
+
+// TestProbeDetectsEachPayloadStyle proves every style survives a server that
+// echoes the query value verbatim. Each subtest rejects all other styles, so a
+// filter that lets exactly one mangled form through still yields a finding.
+func TestProbeDetectsEachPayloadStyle(t *testing.T) {
+	for index, style := range Payloads() {
+		style := style
+		t.Run(fmt.Sprintf("payload-%d", index), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("next"); got == style {
+					w.Header().Set("Location", got)
+					w.WriteHeader(http.StatusFound)
+					return
+				}
+				w.Write([]byte("blocked"))
+			}))
+			defer server.Close()
+
+			analyzer := New(newTestClient(t))
+			found, ok := analyzer.Probe(context.Background(), Target{URL: server.URL + "/?next=/home", Name: "next"})
+			if !ok {
+				t.Fatalf("payload %q was not detected", style)
+			}
+			if found.Value != style {
+				t.Fatalf("reported payload = %q, want %q", found.Value, style)
+			}
+		})
+	}
+}
+
 func TestLeavesSite(t *testing.T) {
 	cases := []struct {
 		location string
@@ -171,6 +229,14 @@ func TestLeavesSite(t *testing.T) {
 		{`\\example.com/solitools-redirect-check`, true},
 		{`\/example.com/solitools-redirect-check`, true},
 		{`/\notexample.com/solitools-redirect-check`, false},
+		// A backslash after the authority is a path separator to a browser, but
+		// url.Parse rejects the value as a host name, so the fold has to happen
+		// before parsing or a real redirect looks unparseable.
+		{`//example.com\solitools-redirect-check`, true},
+		{`https://example.com\solitools-redirect-check`, true},
+		// A single leading backslash is a path to a browser, exactly like a
+		// single leading slash.
+		{`\example.com/solitools-redirect-check`, false},
 		// A single slash is a path, not an authority separator.
 		{`/example.com/solitools-redirect-check`, false},
 		// A UNC-style path is not a URL and must not be reported.

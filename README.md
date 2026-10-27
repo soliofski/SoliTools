@@ -257,13 +257,14 @@ a comment**, +10 for consistency across canaries, −10 on a 4xx/5xx response,
 
 ### redirect — open redirects
 
-Only redirect-specific parameters are tested, with three payload styles
-(`https://`, `//`, `/\`). A finding requires an actual `Location` header
-pointing at the canary host — an echoed value is not a redirect, and a relative
-redirect is normal application behaviour, not a vulnerability. A `Location`
-that echoes the backslash form is normalised before analysis, because browsers
-treat a leading backslash as a slash: a filter that only blocks `//` does not
-hide the finding.
+Only redirect-specific parameters are tested, with five payload styles
+(`https://`, `//`, and the backslash forms `/\`, `\/`, `\\`). A finding requires
+an actual `Location` header pointing at the canary host — an echoed value is not
+a redirect, and a relative redirect is normal application behaviour, not a
+vulnerability. Backslashes are folded to slashes before analysis, because
+browsers do the same everywhere in a special-scheme URL: a filter that only
+blocks `//` does not hide the finding, and `//host[backslash]path` is still
+recognised even though Go's parser rejects it on its own.
 
 ### path — sensitive paths
 

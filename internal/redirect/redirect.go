@@ -29,13 +29,19 @@ const (
 )
 
 // Payloads returns the redirect payload styles: absolute, scheme-relative and
-// backslash-mangled, which many naive filters let through.
+// the three backslash-mangled forms, which many naive filters let through.
+//
+// Each mangled form is a separate bypass, not decoration: a check that rejects
+// only "/\" still forwards "\/" and "\\", and a browser resolves all three to
+// the same external host.
 func Payloads() []string {
 	absolute := "https://" + canaryHost + canaryPath
 	return []string{
 		absolute,
 		"//" + canaryHost + canaryPath,
 		`/\` + canaryHost + canaryPath,
+		`\/` + canaryHost + canaryPath,
+		`\\` + canaryHost + canaryPath,
 	}
 }
 
@@ -145,19 +151,25 @@ func leavesSite(location, base string) bool {
 
 // normalizeLocation rewrites a scheme-relative Location into an absolute URL.
 //
-// Browsers treat a backslash as a slash in the authority position, so "/\host",
+// Browsers treat a backslash as a slash in a special-scheme URL, so "/\host",
 // "\/host" and "\\host" all mean "//host". A filter that only blocks "//" lets
 // those through, and the server may echo the value back verbatim; normalising
-// the leading run before parsing turns such an echo into a detectable external
-// redirect instead of an unparseable relative path.
+// before parsing turns such an echo into a detectable external redirect instead
+// of an unparseable relative path.
+//
+// Folding every backslash, not just a leading run, also covers one case Go's
+// parser gets wrong on its own: "//host\path" is external to a browser, yet
+// url.Parse rejects it outright ("invalid character in host name"), which would
+// hide a real redirect instead of flagging it.
 //
 // A single leading slash is a path and must stay one, otherwise every internal
-// redirect would look external.
+// redirect would look external. Browsers treat a single leading backslash the
+// same way, and folding it leaves exactly one separator, so it stays a path too.
 func normalizeLocation(location string) string {
-	candidate := strings.TrimSpace(location)
+	candidate := strings.ReplaceAll(strings.TrimSpace(location), `\`, "/")
 
 	separators := 0
-	for separators < len(candidate) && (candidate[separators] == '/' || candidate[separators] == '\\') {
+	for separators < len(candidate) && candidate[separators] == '/' {
 		separators++
 	}
 	if separators >= 2 {
