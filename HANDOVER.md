@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.8.0` · **Branch:** `main` · **Commits:** 12
-**Size:** 49 Go files (30 source, 19 test), ~8,100 lines including tests, 143 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.9.0` · **Branch:** `main` · **Commits:** 13
+**Size:** 52 Go files (31 source, 21 test), ~8,900 lines including tests, 162 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -106,8 +106,11 @@ detection, or gates: some failures only appear for certain random keys.
 | `-timeout` | 15s | per-request timeout, body included |
 | `-max-params` | 10 | parameters actively probed |
 | `-skip-path` | off | skip the sensitive-path wordlist |
+| `-wordlist` | none | custom sensitive-path wordlist (capped at 200) |
 | `-forms` | off | submit POST forms (state-changing; same-origin only) |
 | `-stored` | off | re-fetch known pages to detect stored / blind XSS |
+| `-crawl` | off | follow same-origin seed links, depth one |
+| `-max-pages` | 10 | pages fetched when crawling, seed included |
 | `-verbose` | off | print the score derivation and signals |
 | `-quiet` | off | one-line summary only; implies plain output |
 | `-width` | 0 | wrap to N columns; `0` detects the terminal |
@@ -126,7 +129,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 
 ```json
 {
-  "version": "0.4.0",
+  "version": "0.9.0",
   "target": "https://target.example/?q=1",
   "threshold": 60,
   "findings": [
@@ -180,6 +183,7 @@ internal/confidence scoring model: base + signals, clamp, band
 internal/secret    credential detection
 internal/js        script triage + endpoint extraction
 internal/form      HTML form parsing, safety classification
+internal/crawl     depth-one same-origin link discovery
 internal/param     parameter classification
 internal/reflect   reflected-input canaries
 internal/redirect  open redirect verification
@@ -200,6 +204,7 @@ flowchart LR
     SECRET["internal/secret"]
     JS["internal/js"]
     FORM["internal/form"]
+    CRAWL["internal/crawl"]
     PARAM["internal/param"]
     REFLECT["internal/reflect"]
     REDIRECT["internal/redirect"]
@@ -217,6 +222,7 @@ flowchart LR
     SCAN --> SECRET
     SCAN --> JS
     SCAN --> FORM
+    SCAN --> CRAWL
     SCAN --> PARAM
     SCAN --> REFLECT
     SCAN --> REDIRECT
@@ -254,9 +260,10 @@ flowchart LR
 ├── .gitignore                 /solitools, /solitools.exe, editor noise
 ├── cmd/solitools/
 │   ├── main.go                flags, banner, wiring, exit codes
-│   └── main_test.go           13 CLI tests against httptest servers
+│   └── main_test.go           21 CLI tests against httptest servers
 └── internal/
     ├── confidence/            scoring model
+    ├── crawl/                 depth-one same-origin link discovery
     ├── errgroup/              local x/sync subset
     ├── finding/               shared Finding type
     ├── form/                  form parsing, safety classification
@@ -288,14 +295,16 @@ flowchart LR
 ```mermaid
 flowchart TD
     START(["solitools scan URL"]) --> FETCH["httpx.Fetch<br/>follow up to 5 redirects"]
-    FETCH --> PAGE["secret.Scan<br/>page body"]
+    FETCH --> CRAWL["crawl.Links<br/>same origin, depth 1<br/>cap -max-pages"]
+    CRAWL --> PAGE["per page: secret.Scan<br/>forms + endpoints"]
     PAGE --> SCRIPTS["js.ScriptURLs<br/>drop third-party hosts"]
     SCRIPTS --> FETCHJS["fetch up to 10 first-party bundles<br/>4 concurrent"]
     FETCHJS --> SEC2["secret.Scan<br/>each bundle"]
     FETCHJS --> ENDP["js.ExtractEndpoints"]
     ENDP --> PARAMS["param.Names<br/>drops utm_ and fbclid"]
     PARAMS --> PROBE["probe up to 10 parameters<br/>reflect + redirect"]
-    PROBE --> PATHS["pathscan<br/>20 of 26 words"]
+    PROBE --> STORED["reflect.Stored<br/>when -stored"]
+    STORED --> PATHS["pathscan<br/>default 20 or custom list"]
     PATHS --> DEDUPE["dedupe + sort by confidence"]
     DEDUPE --> OUT(["scan.Result"])
 ```
@@ -318,10 +327,12 @@ sequenceDiagram
     CLI->>S: Run with Progress callback
     S->>H: Fetch target page
     H-->>S: status, headers, body
-    S->>M: secret.Scan page body
+    S->>M: crawl.Links, then fetch up to -max-pages
+    S->>M: secret.Scan every page body
     S->>H: fetch first-party scripts
     S->>M: secret.Scan and js.ExtractEndpoints per bundle
     S->>M: reflect and redirect probes per parameter
+    S->>M: reflect.Stored when -stored
     S->>M: pathscan over the wordlist
     M-->>S: candidate findings
     S->>S: dedupe, sort, count
@@ -338,9 +349,12 @@ flowchart LR
         A["scripts<br/>limit 4"]
         B["probes<br/>limit 4"]
         C["paths<br/>limit 6"]
+        D["crawl<br/>limit 4"]
     end
+    D --> A
     A --> B
     B --> C
+    D --> L
     A --> L
     B --> L
     C --> L
@@ -582,6 +596,38 @@ a UNC-style `[backslash][backslash]server[backslash]share` path must still fail
 the host check. All of it is pinned in `TestLeavesSite`, and
 `TestProbeDetectsEachPayloadStyle` proves every payload style end to end.
 
+### 8.6 `crawl` — depth-one discovery
+
+`crawl.Links(document, base, limit)` returns absolute, same-origin page URLs and
+nothing else. It is the whole safety boundary of the crawl, so its rules are
+explicit:
+
+- **Origin is exact**: scheme, host and effective port must match the seed. A
+  link that upgrades http to https or changes a port is a different site and is
+  dropped. `effectivePort` treats `:443`/`:80` and the implicit default as one.
+- **Assets are not pages**: `.css`, `.js`, images, fonts, `.pdf`, `.zip`, `.gz`,
+  `.mp4` — `path.Ext` on the lowercased path decides.
+- **Destructive paths are not pages**: `logout`, `log-out`, `signout`,
+  `sign-out`, `deactivate`, `delete-account`/`delete_account` anywhere in the
+  path. Fetching them would end the session a scan is trying to observe.
+- **Only `<a href>`**: `<link>`, `<area>` and inline scripts are ignored. Single,
+  double and unquoted values are accepted, and HTML entities (`&amp;`) are
+  unescaped before parsing.
+- Fragments and trailing slashes are normalised, duplicates dropped, and the
+  seed itself is never returned again. `limit` is the crawl budget
+  (`-max-pages` minus the seed).
+
+Depth stays one by construction: `scan.crawlPages` parses links from the seed
+body only. A link discovered on a crawled page is never followed, which also
+means a hostile page cannot steer the scan. Fetches use `Client.Get` (never
+`Fetch`), so a crawled redirect is not followed off-origin, and they share the
+global token bucket at concurrency 4. Only `200` responses join the page set.
+
+Everything downstream treats a crawled page exactly like the seed: secrets are
+scanned per page, endpoints and parameters are extracted against that page's own
+URL, scripts are deduplicated across pages and capped by `MaxScripts`, and forms
+consume the run-wide `MaxForms` budget in page order.
+
 ### 8.7 `form` — parameters hidden in markup
 
 Entry point: `form.Parse(html, base) []Form`, then `Form.Values()` and
@@ -615,7 +661,12 @@ request is a GET. If you extend the tool, keep that property: a POST must always
 be traceable to an explicit user decision.
 
 26 entries (`.env`, `.git/config`, `.aws/credentials`, `id_rsa`, backups,
-`actuator`, `swagger-ui.html`, …), capped at 20 per run. Only `200`, `401`,
+`actuator`, `swagger-ui.html`, …), capped at 20 per run. A custom `-wordlist`
+replaces the list entirely: `pathscan.LoadWordlist` trims whitespace, skips
+blank lines and `#` comments, removes duplicates, trims leading slashes, and
+caps at `MaxCustomWords` (200) with a `truncated` flag that surfaces as a scan
+warning. A custom list is used in full — the 20-entry default budget applies
+only to the built-in list. Only `200`, `401`,
 `403` count. A random baseline detects catch-all hosts by comparing body size
 relative to the page (with a 200-byte scale floor). Default server pages are
 discarded. `200` outranks `403`.
@@ -660,22 +711,23 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-143 test functions. The distribution matters more than the number:
+162 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
 | `secret` (21) | every rule positive, plus explicit false-positive regressions |
 | `report` (16) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
 | `term` (11) | mode precedence, palette mapping, width parsing |
-| `cmd` (17) | exit codes, flags, JSON schema, quiet, colour, form and stored opt-in |
+| `cmd` (21) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist errors |
 | `form` (10) | action resolution, field classes, destructive detection |
+| `crawl` (6) | same-origin and port rules, asset/logout exclusions, normalisation, cap |
 | `httpx` (7) | POST body, redirect policy, header injection, error classes |
 | `js` (6) | script resolution, third-party, endpoint filtering |
 | `param` (4) | classification, noise removal |
 | `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
 | `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
-| `pathscan` (3) | status filter, soft-404, catch-all host |
-| `scan` (9) | full pipeline, form opt-in, cross-origin rejection, stored opt-in and baseline guard |
+| `pathscan` (8) | status filter, soft-404, catch-all host, wordlist loading and cap |
+| `scan` (13) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist |
 | `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 
@@ -701,6 +753,8 @@ hosts.
 | One credential yields one finding | vendor table + `TestRunEndToEnd` occurrences |
 | A reflection needs 2 canaries or the tag canary | `TestProbeRejectsEscapedReflection` |
 | A stored finding never repeats a reflected one | `TestStoredIgnoresImmediateReflection` |
+| A crawl never leaves the seed origin, and never goes deeper than one link | `TestLinksKeepsOnlySafeSameOriginPages`, `TestRunCrawlIsDepthOneAndFiltered` |
+| A custom wordlist replaces the default, capped at 200 | `TestLoadWordlistCapsEntries`, `TestRunUsesCustomWordlist` |
 | An open redirect needs an external `Location` | `TestProbeIgnoresInternalRedirect` |
 | A catch-all host yields no path findings | `TestProbeSkipsCatchAllHosts` |
 | Scores are deterministic and clamped | `internal/confidence` tests |
@@ -748,8 +802,9 @@ hosts.
 | done | ~~SARIF output~~ | Shipped in 0.6.0 as `-sarif`. |
 | done | ~~More secret rules~~ | Shipped in 0.7.0: JSON-escaped PEM, Discord webhooks, Telegram bot tokens, Azure SAS. |
 | done | ~~Stored / blind reflection~~ | Shipped in 0.8.0 as `-stored`: `Submit` keeps the evidence, a second pass re-fetches known pages, and only canaries absent from the immediate response qualify. Same-origin, capped at five pages, no out-of-band listener. |
-| 1 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. It is also what makes stored checks reach a listing page. |
-| 2 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| done | ~~Multi-page crawl~~ | Shipped in 0.9.0 as `-crawl` + `-max-pages`: depth one, exact origin, assets and destructive paths excluded, crawled pages feeding secrets, forms, parameters and stored observation. |
+| 1 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| 2 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.
@@ -758,13 +813,16 @@ reports evidence; it does not weaponise it.
 
 ## 14. Known limitations (be honest about these)
 
-- Single page. `GET` by default; POST only for forms behind `-forms`. No JSON
-  bodies, no cookies beyond `-cookie`.
+- Single page by default; `-crawl` adds depth-one same-origin pages, seed
+  included in the `-max-pages` cap. `GET` by default; POST only for forms
+  behind `-forms`. No JSON bodies, no cookies beyond `-cookie`.
 - Stored reflection is observed once, later in the same run, and only on pages
   the scan already knows. No out-of-band blind detection, no DOM XSS analysis
   (the `js` module extracts endpoints, it does not execute or symbolically
   evaluate JavaScript).
-- Path scanning uses a fixed 26-entry list.
+- Path scanning uses a fixed 26-entry list, or a custom file capped at 200
+  entries. Crawling is depth one, opt-in, and capped at 10 pages including the
+  seed.
 - Third-party detection uses a small suffix table, so exotic TLDs (`co.zw`,
   `com.ar`) may be misclassified.
 - JWTs are reported on structure alone; many are legitimately public.
@@ -781,6 +839,12 @@ reports evidence; it does not weaponise it.
 | `fc86342` | feat: rebuild SoliTools as a URL-based web scanner with six modules | replaced the file walker with the HTTP pipeline; added js, param, reflect, redirect, pathscan; bands rebased to 60/75/90 |
 | `2e20a0d` | feat(ui): color the terminal report and add a live scan status | `term`, `progress`, badges, boxed summary, `-color`, VT mode |
 | `d5dd2ac` | feat(ui): wrap long values to terminal width and add `-quiet` | width detection for Windows/Linux/BSD, hanging-indent wrapping, CI summary |
+| `16f7b8f` | feat(scan): probe POST form parameters behind `-forms` | GET forms folded into the URL path; POST opt-in with same-origin and destructive filters |
+| `bcd95be` | feat(report): emit SARIF 2.1.0 for code scanning | `-sarif`, rule catalogue, severity mapping |
+| `b8aa0e7` | feat(secret): detect JSON-escaped PEM, Discord, Telegram and Azure SAS | rules 18–21 |
+| `ecf3b5c` | docs: record the RE2 nested-repeat limitation | trap 13 |
+| `483c8fa` | fix(redirect): detect every backslash payload style | five payloads; backslashes folded before parsing |
+| `2b7e85b` | feat(reflect): detect stored reflection with an opt-in second pass | `-stored`, `Submit`/`Analyze`, observation re-fetch |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
@@ -801,13 +865,16 @@ threshold inside the scanner.
    records or send mail.
 3. **Live validation.** Any provider check means contacting a third party with a
    user's credential. That is a product decision, not an implementation detail.
-4. **Crawl depth.** Multi-page scanning multiplies requests; decide whether it
-   is a flag, a default cap, or out of scope.
-5. **Wordlist ownership.** Fixed list today. A `-wordlist` file would be useful
-   but invites 100k-line noise, which contradicts the precision thesis.
+4. **Crawl depth.** Decided in 0.9.0: `-crawl` is opt-in, depth one, exact
+   origin, and `-max-pages` (default 10) counts the seed. Widening to depth two
+   would multiply requests and hand control of the request plan to the target,
+   so re-open it only with a hard per-depth cap and a test for it.
+5. **Wordlist ownership.** Decided in 0.9.0: `-wordlist` exists, replaces the
+   default list entirely, strips comments and blanks, and is capped at 200 with
+   a truncation warning. A larger cap is a product change, not a tuning knob.
 6. **Generic rules.** They live in the default set and rely on score arithmetic
    to stay quiet. A `-generic` switch would be more explicit — but one more flag.
-7. **Versioning.** `0.4.0` exists only in code; there are no tags and no remote.
+7. **Versioning.** `0.9.0` exists only in code; there are no tags and no remote.
    Tag releases if this is going to be distributed.
 8. **No CI.** Verification is local. A workflow would need the same three
    commands plus the GOCACHE reminder.

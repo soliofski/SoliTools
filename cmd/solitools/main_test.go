@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -269,6 +271,92 @@ func TestQuietKeepsJSONParseable(t *testing.T) {
 func TestNegativeWidthIsRejected(t *testing.T) {
 	if code, _, _ := runCLI(t, "scan", "-width", "-5", "https://example.com"); code != 2 {
 		t.Fatalf("exit = %d, want 2 for a negative width", code)
+	}
+}
+
+func TestMaxPagesMustBePositive(t *testing.T) {
+	if code, _, stderr := runCLI(t, "scan", "-max-pages", "0", "https://example.com"); code != 2 {
+		t.Fatalf("exit = %d, want 2: %s", code, stderr)
+	}
+}
+
+func TestMissingWordlistIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent.txt")
+	code, _, stderr := runCLI(t, "scan", "-wordlist", path, "https://example.com")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "wordlist") {
+		t.Fatalf("stderr = %q, want a wordlist error", stderr)
+	}
+}
+
+func TestCrawlFlagFetchesLinkedPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/" {
+			fmt.Fprint(w, `<html><body><a href="/extra">extra</a></body></html>`)
+			return
+		}
+		fmt.Fprint(w, "<html><body>extra page</body></html>")
+	}))
+	defer server.Close()
+
+	decodePages := func(stdout string) int {
+		t.Helper()
+		var payload struct {
+			Stats struct {
+				Pages int `json:"pages"`
+			} `json:"stats"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("JSON: %v\n%s", err, stdout)
+		}
+		return payload.Stats.Pages
+	}
+
+	code, stdout, _ := runCLI(t, "scan", "-json", "-skip-path", "-rate", "500", server.URL+"/")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 without crawl:\n%s", code, stdout)
+	}
+	if pages := decodePages(stdout); pages != 1 {
+		t.Fatalf("pages = %d, want 1 without -crawl", pages)
+	}
+
+	code, stdout, _ = runCLI(t, "scan", "-json", "-skip-path", "-crawl", "-rate", "500", server.URL+"/")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 with crawl:\n%s", code, stdout)
+	}
+	if pages := decodePages(stdout); pages != 2 {
+		t.Fatalf("pages = %d, want seed plus the linked page", pages)
+	}
+}
+
+func TestWordlistFlagIsUsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "words.txt")
+	if err := os.WriteFile(path, []byte("# custom\n\n.hidden\n"), 0o600); err != nil {
+		t.Fatalf("write wordlist: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.hidden" {
+			w.Write([]byte("<html><body>reachable</body></html>"))
+			return
+		}
+		if r.URL.Path == "/" {
+			w.Write([]byte("<html><body>home</body></html>"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	code, stdout, _ := runCLI(t, "scan", "-json", "-wordlist", path, "-rate", "500", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 for the custom hit:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "/.hidden") {
+		t.Fatalf("the custom path is missing from the report:\n%s", stdout)
 	}
 }
 

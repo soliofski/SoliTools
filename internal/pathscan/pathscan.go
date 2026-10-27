@@ -6,11 +6,13 @@
 package pathscan
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -58,11 +60,57 @@ var sensitiveWords = map[string]struct{}{
 	"config.php": {}, "config.json": {}, "web.config": {},
 }
 
-// Wordlist returns a copy of the default wordlist.
-func Wordlist() []string {
+// MaxCustomWords is the hard ceiling for a user-supplied wordlist. A scanner
+// that probes thousands of paths is no longer surgical, and the precision
+// thesis does not survive that much noise.
+const MaxCustomWords = 200
+
+// DefaultWordlist returns a copy of the built-in, high-value path list.
+func DefaultWordlist() []string {
 	out := make([]string, len(wordlist))
 	copy(out, wordlist)
 	return out
+}
+
+// LoadWordlist reads a custom wordlist: one path per line, blank lines and
+// #-comments ignored, duplicates removed, leading slashes trimmed because the
+// probe joins values to the base URL itself. limit caps the result; zero means
+// no cap, and the boolean reports whether entries were dropped.
+func LoadWordlist(path string, limit int) ([]string, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("wordlist: %w", err)
+	}
+	defer file.Close()
+
+	words := make([]string, 0, 32)
+	seen := make(map[string]struct{}, 32)
+	truncated := false
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimLeft(line, "/")
+		if line == "" {
+			continue
+		}
+		if _, duplicate := seen[line]; duplicate {
+			continue
+		}
+		seen[line] = struct{}{}
+		if limit > 0 && len(words) >= limit {
+			truncated = true
+			continue
+		}
+		words = append(words, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, false, fmt.Errorf("wordlist: %w", err)
+	}
+	return words, truncated, nil
 }
 
 // Analyzer probes paths through a shared client.
@@ -76,7 +124,7 @@ type Analyzer struct {
 // bounds concurrency and defaults to 8.
 func New(client *httpx.Client, words []string, limit int) *Analyzer {
 	if len(words) == 0 {
-		words = Wordlist()
+		words = DefaultWordlist()
 	}
 	if limit <= 0 {
 		limit = 8

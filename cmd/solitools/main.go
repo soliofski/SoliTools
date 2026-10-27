@@ -17,13 +17,14 @@ import (
 
 	"solitools/internal/confidence"
 	"solitools/internal/httpx"
+	"solitools/internal/pathscan"
 	"solitools/internal/progress"
 	"solitools/internal/report"
 	"solitools/internal/scan"
 	"solitools/internal/term"
 )
 
-const version = "0.8.0"
+const version = "0.9.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -70,8 +71,11 @@ Flags for scan:
   -timeout duration       per-request timeout (default 15s)
   -max-params int         maximum parameters to probe (default 10)
   -skip-path              skip the sensitive-path wordlist
+  -wordlist string        custom sensitive-path wordlist (capped at 200 entries)
   -forms                  submit POST forms (may change state; same-origin only)
   -stored                 re-fetch known pages to detect stored/blind XSS
+  -crawl                  follow same-origin links on the seed page (depth 1)
+  -max-pages int          maximum pages fetched when crawling, seed included (default 10)
   -verbose                show the score derivation
   -quiet                  print only a one-line summary (CI mode)
   -width int              wrap output to this many columns (0 = detect)
@@ -115,6 +119,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
 	submitForms := flags.Bool("forms", false, "submit POST forms (may change state; same-origin only)")
 	stored := flags.Bool("stored", false, "re-fetch known pages to detect stored/blind reflection")
+	crawl := flags.Bool("crawl", false, "follow same-origin links on the seed page (depth 1)")
+	maxPages := flags.Int("max-pages", scan.DefaultMaxPages, "maximum pages fetched when crawling, seed included")
+	wordlistPath := flags.String("wordlist", "", "custom sensitive-path wordlist (capped at 200 entries)")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
 	quiet := flags.Bool("quiet", false, "print only a one-line summary")
 	width := flags.Int("width", 0, "wrap output to this many columns (0 = detect)")
@@ -138,6 +145,28 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	if *asJSON && *asSARIF {
 		fmt.Fprintln(stderr, "solitools scan: -json and -sarif are mutually exclusive")
 		return 2
+	}
+
+	if *maxPages < 1 {
+		fmt.Fprintf(stderr, "solitools scan: -max-pages must be at least 1, got %d\n", *maxPages)
+		return 2
+	}
+
+	// Load the custom wordlist here so a bad path fails before any request, and
+	// so the cap warning can travel with the scan result.
+	var wordlist []string
+	wordlistTruncated := false
+	if *wordlistPath != "" {
+		words, truncated, err := pathscan.LoadWordlist(*wordlistPath, pathscan.MaxCustomWords)
+		if err != nil {
+			fmt.Fprintf(stderr, "solitools scan: %v\n", err)
+			return 2
+		}
+		if len(words) == 0 {
+			fmt.Fprintf(stderr, "solitools scan: %s contains no usable entries\n", *wordlistPath)
+			return 2
+		}
+		wordlist, wordlistTruncated = words, truncated
 	}
 
 	shade, err := term.ParseMode(*colorMode)
@@ -193,7 +222,12 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		EnableForms: *submitForms,
 		// Opt-in: extra requests, and the answer may be state a POST wrote.
 		EnableStored: *stored,
-		Progress:     live.Stage,
+		// Opt-in: a crawl multiplies requests; the cap keeps it bounded.
+		EnableCrawl:       *crawl,
+		MaxPages:          *maxPages,
+		Wordlist:          wordlist,
+		WordlistTruncated: wordlistTruncated,
+		Progress:          live.Stage,
 	})
 	live.Stop()
 	if err != nil {

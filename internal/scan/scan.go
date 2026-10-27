@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"solitools/internal/crawl"
 	"solitools/internal/errgroup"
 	"solitools/internal/finding"
 	"solitools/internal/form"
@@ -37,6 +38,8 @@ const (
 	DefaultMaxForms = 3
 	// DefaultMaxStoredPages caps stored-reflection re-fetches, which are opt-in.
 	DefaultMaxStoredPages = 5
+	// DefaultMaxPages caps a crawl, seed page included.
+	DefaultMaxPages = 10
 )
 
 // Options configures a scan.
@@ -64,6 +67,15 @@ type Options struct {
 	EnableStored bool
 	// MaxStoredPages caps how many pages the stored pass re-fetches.
 	MaxStoredPages int
+	// EnableCrawl follows same-origin links on the seed page (depth one).
+	EnableCrawl bool
+	// MaxPages caps how many pages a crawl fetches, seed included.
+	MaxPages int
+	// Wordlist replaces the built-in sensitive-path list. It is already capped
+	// by pathscan.LoadWordlist.
+	Wordlist []string
+	// WordlistTruncated reports that a custom list was capped while loading.
+	WordlistTruncated bool
 	// Progress is called at each pipeline stage with a short human label. It is
 	// always invoked from the goroutine that called Run, never concurrently.
 	Progress func(stage string)
@@ -91,6 +103,9 @@ func (o Options) normalized() Options {
 	}
 	if o.MaxStoredPages <= 0 {
 		o.MaxStoredPages = DefaultMaxStoredPages
+	}
+	if o.MaxPages <= 0 {
+		o.MaxPages = DefaultMaxPages
 	}
 	return o
 }
@@ -144,19 +159,62 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	result.Stats.Pages = 1
 	result.Target = page.URL
 
-	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission)}
-	// The page body already contains every inline script, so scanning it once
-	// covers them; scanning them separately would double-count the same secret.
-	collected.addSecret(scanner.Scan(secret.Document{Source: page.URL, Body: page.Body}))
-
 	base, err := url.Parse(page.URL)
 	if err != nil {
 		return result, fmt.Errorf("scan: %w", err)
 	}
 
-	scripts := js.ScriptURLs(page.Body, base)
-	firstParty := firstPartyScripts(scripts, base)
-	result.Stats.ThirdPartyScripts = len(scripts) - len(firstParty)
+	fetched := []fetchedPage{{URL: page.URL, Body: page.Body}}
+	if options.EnableCrawl {
+		options.reportProgress("crawling links")
+		fetched = append(fetched, crawlPages(ctx, options, base, fetched[0], options.MaxPages-1)...)
+	}
+	result.Stats.Pages = len(fetched)
+
+	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission)}
+	// The page body already contains every inline script, so scanning it once
+	// covers them; scanning them separately would double-count the same secret.
+	for _, current := range fetched {
+		collected.addSecret(scanner.Scan(secret.Document{Source: current.URL, Body: current.Body}))
+	}
+
+	scripts := make([]string, 0, 8)
+	seenScripts := make(map[string]struct{}, 8)
+	seenThirdParty := make(map[string]struct{}, 8)
+	usedForms := 0
+
+	for _, current := range fetched {
+		currentBase, err := url.Parse(current.URL)
+		if err != nil {
+			continue
+		}
+		collected.addEndpoints(js.ExtractEndpoints(current.Body, currentBase))
+		collected.addParams(currentBase)
+
+		for _, scriptURL := range js.ScriptURLs(current.Body, currentBase) {
+			parsed, err := url.Parse(scriptURL)
+			if err != nil {
+				continue
+			}
+			if js.IsThirdParty(parsed, currentBase) {
+				if _, counted := seenThirdParty[scriptURL]; !counted {
+					seenThirdParty[scriptURL] = struct{}{}
+					result.Stats.ThirdPartyScripts++
+				}
+				continue
+			}
+			if _, duplicate := seenScripts[scriptURL]; duplicate {
+				continue
+			}
+			seenScripts[scriptURL] = struct{}{}
+			scripts = append(scripts, scriptURL)
+		}
+
+		// MaxForms is a run-wide budget, so each page receives what is left.
+		usedForms += collected.addForms(current.Body, currentBase, options.EnableForms, options.MaxForms-usedForms)
+	}
+
+	firstParty := scripts
 	if len(firstParty) > options.MaxScripts {
 		firstParty = firstParty[:options.MaxScripts]
 	}
@@ -173,11 +231,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				return nil
 			}
 			collected.addSecret(scanner.Scan(secret.Document{Source: scriptURL, Body: response.Body}))
-			collected.addEndpoints(js.ExtractEndpoints(response.Body, base))
 
 			// Endpoints discovered inside a bundle may themselves carry
 			// parameters, but only those on the script's own origin are useful.
 			if parsed, err := url.Parse(scriptURL); err == nil {
+				collected.addEndpoints(js.ExtractEndpoints(response.Body, parsed))
 				collected.addParams(parsed)
 			}
 			return nil
@@ -185,10 +243,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	_ = group.Wait()
 
-	collected.addEndpoints(js.ExtractEndpoints(page.Body, base))
 	collected.addParams(target)
-	collected.addParams(base)
-	result.Stats.Forms = collected.addForms(page.Body, base, options.EnableForms, options.MaxForms)
+	result.Stats.Forms = usedForms
 
 	endpoints, params := collected.snapshot()
 	result.Stats.Endpoints = len(endpoints)
@@ -242,8 +298,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	_ = probeGroup.Wait()
 
 	// Stored reflection is a second-pass question about the same submissions:
-	// the page is fetched again later in the run, and only canaries that were
-	// absent from the immediate response can qualify.
+	// known pages are fetched again later in the run, and only canaries that
+	// were absent from the immediate response can qualify.
 	if options.EnableStored {
 		options.reportProgress("checking stored reflections")
 		if containsCanary(page.Body) {
@@ -252,12 +308,34 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			// false attribution to this scan.
 			result.Warnings = append(result.Warnings, "stored check skipped: the target body already contained a canary")
 		} else {
-			pages := collected.storedPages(options.MaxStoredPages)
+			limit := options.MaxStoredPages
+			targets := collected.storedPages()
+			if options.EnableCrawl {
+				// A crawled page can be the listing that serves a value stored
+				// elsewhere, so the crawled set becomes observation targets too.
+				limit = options.MaxPages
+				targets = append(targets, page.URL)
+				for _, current := range fetched[1:] {
+					targets = append(targets, current.URL)
+				}
+			}
+			targets = uniquePages(targets, limit)
+
+			submissions := collected.allSubmissions()
+			known := make(map[string][]byte, len(fetched))
+			for _, current := range fetched {
+				known[current.URL] = current.Body
+			}
+
 			storedGroup, storedCtx := errgroup.WithContext(ctx)
 			storedGroup.SetLimit(2)
-			for _, pageURL := range pages {
+			checked := 0
+			for _, pageURL := range targets {
 				pageURL := pageURL
-				submissions := collected.submissionsFor(pageURL)
+				if body, ok := known[pageURL]; ok && containsCanary(body) {
+					continue
+				}
+				checked++
 				storedGroup.Go(func() error {
 					for _, candidate := range reflectAnalyzer.Stored(storedCtx, pageURL, submissions) {
 						collected.addFinding(candidate)
@@ -266,15 +344,21 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				})
 			}
 			_ = storedGroup.Wait()
-			result.Stats.StoredPages = len(pages)
+			result.Stats.StoredPages = checked
 		}
 	}
 
 	if !options.SkipPath {
 		options.reportProgress("scanning sensitive paths")
-		words := pathscan.Wordlist()
-		if len(words) > options.MaxPathWords {
-			words = words[:options.MaxPathWords]
+		// A custom list is already capped at MaxCustomWords while loading, so
+		// applying the default 20-entry budget to it would silently ignore most
+		// of what the user asked for.
+		words := options.Wordlist
+		if len(words) == 0 {
+			words = pathscan.DefaultWordlist()
+			if len(words) > options.MaxPathWords {
+				words = words[:options.MaxPathWords]
+			}
 		}
 		origin := target.Scheme + "://" + target.Host
 		paths, warnings := pathscan.New(options.Client, words, 6).Probe(ctx, origin)
@@ -282,6 +366,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			collected.addFinding(candidate)
 		}
 		result.Warnings = append(result.Warnings, warnings...)
+		if options.WordlistTruncated {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("wordlist truncated to %d entries", pathscan.MaxCustomWords))
+		}
 	}
 
 	result.Findings = dedupe(collected.findings)
@@ -294,18 +381,64 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 // IsRedirectParam is re-exported for callers that need the same rule.
 func IsRedirectParam(name string) bool { return redirect.IsRedirectParam(name) }
 
-// firstPartyScripts keeps scripts belonging to the target site.
-func firstPartyScripts(scripts []string, base *url.URL) []string {
-	out := make([]string, 0, len(scripts))
-	for _, script := range scripts {
-		parsed, err := url.Parse(script)
-		if err != nil {
+// fetchedPage is one page the pipeline analyses: the seed or a crawled link.
+type fetchedPage struct {
+	URL  string
+	Body []byte
+}
+
+// crawlPages fetches the depth-one links of the seed, four at a time, and
+// returns the successful ones in URL order so a run is reproducible.
+func crawlPages(ctx context.Context, options Options, base *url.URL, seed fetchedPage, budget int) []fetchedPage {
+	if budget <= 0 {
+		return nil
+	}
+	links := crawl.Links(seed.Body, base, budget)
+	if len(links) == 0 {
+		return nil
+	}
+
+	var (
+		mu    sync.Mutex
+		pages []fetchedPage
+	)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(4)
+	for _, link := range links {
+		link := link
+		group.Go(func() error {
+			response, err := options.Client.Get(groupCtx, link)
+			if err != nil || response.Status != 200 {
+				return nil
+			}
+			mu.Lock()
+			pages = append(pages, fetchedPage{URL: link, Body: response.Body})
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = group.Wait()
+
+	sort.SliceStable(pages, func(i, j int) bool { return pages[i].URL < pages[j].URL })
+	return pages
+}
+
+// uniquePages deduplicates while preserving priority order, then caps.
+func uniquePages(pages []string, limit int) []string {
+	seen := make(map[string]struct{}, len(pages))
+	out := make([]string, 0, len(pages))
+	for _, page := range pages {
+		if page == "" {
 			continue
 		}
-		if js.IsThirdParty(parsed, base) {
+		if _, duplicate := seen[page]; duplicate {
 			continue
 		}
-		out = append(out, script)
+		seen[page] = struct{}{}
+		out = append(out, page)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out
 }
@@ -359,8 +492,8 @@ func (c *collector) addSubmission(page string, submission reflect.Submission) {
 	c.stored[page] = append(c.stored[page], submission)
 }
 
-// storedPages returns the pages to re-fetch in a deterministic order.
-func (c *collector) storedPages(limit int) []string {
+// storedPages returns every page that received a submission, sorted.
+func (c *collector) storedPages() []string {
 	c.mu.Lock()
 	pages := make([]string, 0, len(c.stored))
 	for page := range c.stored {
@@ -369,16 +502,27 @@ func (c *collector) storedPages(limit int) []string {
 	c.mu.Unlock()
 
 	sort.Strings(pages)
-	if len(pages) > limit {
-		pages = pages[:limit]
-	}
 	return pages
 }
 
-func (c *collector) submissionsFor(page string) []reflect.Submission {
+// allSubmissions returns every recorded submission in page order. The stored
+// pass checks each observation page against all of them: a value submitted on
+// one page and served on another is exactly the bug it looks for.
+func (c *collector) allSubmissions() []reflect.Submission {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]reflect.Submission(nil), c.stored[page]...)
+
+	pages := make([]string, 0, len(c.stored))
+	for page := range c.stored {
+		pages = append(pages, page)
+	}
+	sort.Strings(pages)
+
+	submissions := make([]reflect.Submission, 0, len(c.stored))
+	for _, page := range pages {
+		submissions = append(submissions, c.stored[page]...)
+	}
+	return submissions
 }
 
 func (c *collector) addEndpoints(endpoints []string) {

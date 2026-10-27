@@ -26,6 +26,13 @@ go test ./...
 solitools scan [flags] <url>
 ```
 
+Two opt-in modes worth knowing up front:
+
+```console
+$ solitools scan -crawl -max-pages 5 -wordlist paths.txt https://target.example/
+$ solitools scan -forms -stored -rate 50 https://target.example/
+```
+
 ```console
 $ solitools scan https://target.example/
 [SECRET] [95] GitHub Token
@@ -69,8 +76,11 @@ usage or runtime error.
 | `-timeout` | 15s | per-request timeout |
 | `-max-params` | 10 | parameters actively probed |
 | `-skip-path` | off | skip the sensitive-path wordlist |
+| `-wordlist` | none | custom sensitive-path wordlist (capped at 200 entries) |
 | `-forms` | off | submit POST forms (may change state; same-origin only) |
 | `-stored` | off | re-fetch known pages to detect stored/blind XSS |
+| `-crawl` | off | follow same-origin links on the seed page (depth 1) |
+| `-max-pages` | 10 | maximum pages fetched when crawling, seed included |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
 | `-sarif` | off | SARIF 2.1.0 log for code scanning (excludes `-json`) |
@@ -289,6 +299,33 @@ A short, high-value wordlist (`.env`, `.git/config`, `.aws/credentials`,
 size comparison sized relative to the page, default server pages are discarded,
 and 200 responses score higher than 403s.
 
+`-wordlist` replaces that list with a file: one path per line, blank lines and
+`#` comments ignored, duplicates dropped, leading slashes trimmed. It is capped
+at 200 entries and a truncation warning is reported, because a scanner that
+probes thousands of paths has stopped being surgical. A custom list is used in
+full; the default 20-entry budget applies only to the built-in list.
+
+### crawl — same-origin pages
+
+`-crawl` follows `<a href>` links found on the seed page, one level deep and
+never further. `-max-pages` (default 10) counts every page in the run, seed
+included, and each fetch passes through the shared rate limiter at concurrency
+4.
+
+Candidates must match the seed's scheme, host and port exactly; a link that
+changes any of the three is ignored, as are `mailto:`, `javascript:`, `tel:` and
+fragment-only links. Asset extensions (`.css`, `.js`, images, fonts, `.pdf`,
+`.zip`, video) and session-ending or destructive paths (`logout`, `signout`,
+`deactivate`, `delete-account`) are never fetched. Fragments and redundant
+trailing slashes are normalised before deduplication, so one page is fetched
+once.
+
+Each crawled page then goes through the same treatment as the seed: secret
+scanning, endpoint and parameter extraction, first-party script analysis, and
+form discovery (GET forms always; POST forms only with `-forms`). With
+`-stored`, crawled pages also become observation targets, which is how a value
+stored by a form on one page is found on a listing page.
+
 ## Infrastructure
 
 - **Polite by default**: a single global token bucket at 10 req/s shared by all
@@ -309,8 +346,11 @@ and 200 responses score higher than 403s.
 - Reflection detection is single-shot on the page itself. With `-stored` the
   scan re-fetches known pages once, later in the run; truly blind XSS needs an
   out-of-band listener and is out of scope.
-- Path scanning uses a fixed wordlist capped at 20 entries by default.
-- Only `GET` requests are used; form and JSON bodies are not probed.
+- Path scanning uses the built-in 26-entry wordlist (first 20 by default), or
+a custom file capped at 200 entries.
+- `GET` is the default; bodies are submitted only for POST forms behind
+  `-forms`. JSON bodies are never sent.
+- Crawling is depth one, opt-in and capped at 10 pages including the seed.
 - Third-party detection uses a small public-suffix table, not the full PSL.
 - Low-entropy real tokens are rejected by design; precision beats recall.
 
@@ -318,4 +358,3 @@ and 200 responses score higher than 403s.
 
 1. Parameter mining from source maps and JSON responses.
 2. Provider-specific live validation behind an explicit flag.
-3. Multi-page crawling behind a flag, so stored checks can reach listings.

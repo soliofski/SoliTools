@@ -237,6 +237,234 @@ func TestRunRequiresClient(t *testing.T) {
 	}
 }
 
+// crawlServer serves a seed page with safe, excluded and off-site links. Links
+// on crawled pages must never be followed at depth one.
+func crawlServer(t *testing.T) (*httptest.Server, func(string) int) {
+	t.Helper()
+	var mu sync.Mutex
+	hits := make(map[string]int)
+	count := func(path string) {
+		mu.Lock()
+		hits[path]++
+		mu.Unlock()
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		count(r.URL.Path)
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<html><body>`+
+				`<a href="/about">about</a><a href="/post">post</a>`+
+				`<a href="/logout">logout</a><a href="/logo.png">logo</a>`+
+				`<a href="https://other.test/x">external</a>`+
+				`</body></html>`)
+		case "/about":
+			fmt.Fprint(w, `<html><body><a href="/deep">deep</a>`+
+				`<form action="/search" method="get"><input name="q"></form></body></html>`)
+		case "/post":
+			if r.Method == http.MethodPost {
+				r.ParseForm()
+				fmt.Fprintf(w, "<html><body><p>%s</p></body></html>", r.PostFormValue("message"))
+				return
+			}
+			fmt.Fprint(w, `<html><body><form action="/post" method="post">`+
+				`<input name="message"></form></body></html>`)
+		case "/search":
+			fmt.Fprintf(w, "<html><body><p>%s</p></body></html>", r.URL.Query().Get("q"))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server, func(path string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hits[path]
+	}
+}
+
+func TestRunCrawlIsDepthOneAndFiltered(t *testing.T) {
+	server, hits := crawlServer(t)
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client, SkipPath: true,
+		EnableCrawl: true, EnableForms: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.Stats.Pages != 3 {
+		t.Fatalf("pages = %d, want seed + /about + /post", result.Stats.Pages)
+	}
+	if hits("/logout") != 0 || hits("/logo.png") != 0 {
+		t.Fatalf("excluded links were fetched: logout=%d png=%d", hits("/logout"), hits("/logo.png"))
+	}
+	if hits("/deep") != 0 {
+		t.Fatal("a link found on a crawled page was followed; depth must stay one")
+	}
+	if hits("/about") == 0 || hits("/post") == 0 {
+		t.Fatal("same-origin links were not fetched")
+	}
+
+	// The GET form on /about and the POST form on /post both reflect.
+	reflections := 0
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindReflect {
+			reflections++
+		}
+	}
+	if reflections != 2 {
+		t.Fatalf("reflections = %d, want one from each crawled form: %+v", reflections, result.Findings)
+	}
+}
+
+func TestRunCrawlOffByDefault(t *testing.T) {
+	server, hits := crawlServer(t)
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.Pages != 1 {
+		t.Fatalf("pages = %d, want only the seed", result.Stats.Pages)
+	}
+	if hits("/about") != 0 {
+		t.Fatal("a crawled page was fetched without -crawl")
+	}
+}
+
+// TestRunCrawlFeedsStoredObservation is the synergy case: the value is stored
+// by a form on the seed and served by a crawled listing page.
+func TestRunCrawlFeedsStoredObservation(t *testing.T) {
+	var mu sync.Mutex
+	var saved string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><a href="/list">list</a>`+
+			`<form action="/guestbook" method="post"><input name="message"></form></body></html>`)
+	})
+	mux.HandleFunc("/guestbook", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.ParseForm()
+			mu.Lock()
+			saved = r.PostFormValue("message")
+			mu.Unlock()
+		}
+		w.Write([]byte("<html><body>thanks</body></html>"))
+	})
+	mux.HandleFunc("/list", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		value := saved
+		mu.Unlock()
+		fmt.Fprintf(w, "<html><body><div>%s</div></body></html>", value)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client, SkipPath: true,
+		EnableCrawl: true, EnableForms: true, EnableStored: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var stored []finding.Finding
+	for _, candidate := range result.Findings {
+		if candidate.RuleID == "reflect.stored" {
+			stored = append(stored, candidate)
+		}
+	}
+	if len(stored) != 1 {
+		t.Fatalf("stored findings = %d, want the crawled listing: %+v", len(stored), result.Findings)
+	}
+	if stored[0].URL != server.URL+"/list" {
+		t.Fatalf("stored URL = %q, want the crawled page", stored[0].URL)
+	}
+}
+
+func TestRunUsesCustomWordlist(t *testing.T) {
+	var mu sync.Mutex
+	hits := make(map[string]int)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/":
+			w.Write([]byte("<html><body>home</body></html>"))
+		case "/.hidden":
+			w.Write([]byte("<html><body>a reachable secret file</body></html>"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client,
+		Wordlist: []string{".hidden"}, WordlistTruncated: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	paths := 0
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindPath {
+			paths++
+		}
+	}
+	if paths != 1 {
+		t.Fatalf("path findings = %d, want the one custom entry: %+v", paths, result.Findings)
+	}
+
+	mu.Lock()
+	defaultHits := hits["/.env"]
+	mu.Unlock()
+	if defaultHits != 0 {
+		t.Fatalf("/.env was probed %d times; the default list must not be merged in", defaultHits)
+	}
+
+	truncated := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "truncated") {
+			truncated = true
+		}
+	}
+	if !truncated {
+		t.Fatalf("warnings = %v, want the wordlist cap warning", result.Warnings)
+	}
+}
+
 // storedServer keeps the last submitted form value and serves it back from the
 // action page, which is exactly what a guestbook does.
 func storedServer(t *testing.T) *httptest.Server {
