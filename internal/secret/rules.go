@@ -2,21 +2,24 @@ package secret
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
+
+	"solitools/internal/confidence"
 )
 
-// HighPrecisionRules returns the detectors enabled by default.
+// Rules returns the full detector set.
 //
-// Inclusion bar: the pattern must encode provider identity — a reserved prefix
-// or an unambiguous structure. Nothing here relies on a bare keyword plus
-// entropy, because that combination is the dominant source of false positives
-// in secret scanning. A rule that would need a human to judge context belongs
-// in the generic set instead.
-func HighPrecisionRules() []*Rule {
+// Inclusion bar for a high base score: the pattern must encode provider
+// identity — a reserved prefix or an unambiguous structure. The generic rules
+// at the end match a shape rather than a provider, so they carry a penalty and
+// land below the default display threshold; they surface with --all.
+func Rules() []*Rule {
 	return []*Rule{
 		{
 			ID:          "secret.private-key",
-			Name:        "Private key block",
+			Title:       "Private Key Block",
+			Category:    "Private Key",
 			Description: "PEM-encoded private key material",
 			Base:        95,
 			Pattern:     `(?s)-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([A-Za-z0-9+/=\s]+?)-----END ([A-Z0-9 ]*PRIVATE KEY)-----`,
@@ -26,10 +29,12 @@ func HighPrecisionRules() []*Rule {
 			// material is treated as key material.
 			Require:         requirePEMBlock,
 			RedactFullMatch: true,
+			ShieldGeneric:   true,
 		},
 		{
 			ID:          "secret.aws-access-key-id",
-			Name:        "AWS access key ID",
+			Title:       "AWS Access Key",
+			Category:    "AWS",
 			Description: "AWS access key identifier",
 			Base:        85,
 			Pattern:     `\b(?:AKIA|ASIA|ABIA|ACCA|AIDA|AIPA|ANPA|ANVA|AROA|APKA)[A-Z0-9]{16}\b`,
@@ -40,7 +45,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.github-token",
-			Name:        "GitHub token",
+			Title:       "GitHub Token",
+			Category:    "GitHub",
 			Description: "GitHub personal access, OAuth or server token",
 			Base:        90,
 			Pattern:     `\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b`,
@@ -51,7 +57,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.github-fine-grained-pat",
-			Name:        "GitHub fine-grained PAT",
+			Title:       "GitHub Fine-Grained Token",
+			Category:    "GitHub",
 			Description: "GitHub fine-grained personal access token",
 			Base:        90,
 			Pattern:     `\bgithub_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}\b`,
@@ -62,7 +69,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.slack-token",
-			Name:        "Slack token",
+			Title:       "Slack Token",
+			Category:    "Slack",
 			Description: "Slack bot, user or app token",
 			Base:        85,
 			Pattern:     `\bxox[baprs]-[A-Za-z0-9-]{10,120}\b`,
@@ -73,7 +81,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.google-api-key",
-			Name:        "Google API key",
+			Title:       "Google API Key",
+			Category:    "Google",
 			Description: "Google API key (AIza prefix)",
 			Base:        80,
 			Pattern:     `\bAIza[0-9A-Za-z_-]{35}\b`,
@@ -84,7 +93,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.stripe-live-key",
-			Name:        "Stripe live key",
+			Title:       "Stripe Live Key",
+			Category:    "Stripe",
 			Description: "Stripe live secret or restricted key",
 			Base:        90,
 			Pattern:     `\b(?:sk|rk)_live_[0-9A-Za-z]{24,247}\b`,
@@ -95,7 +105,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.stripe-test-key",
-			Name:        "Stripe test key",
+			Title:       "Stripe Test Key",
+			Category:    "Stripe",
 			Description: "Stripe test-mode key; cannot move real money",
 			Base:        30,
 			Pattern:     `\b(?:sk|rk)_test_[0-9A-Za-z]{24,247}\b`,
@@ -106,7 +117,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.anthropic-api-key",
-			Name:        "Anthropic API key",
+			Title:       "Anthropic API Key",
+			Category:    "Anthropic",
 			Description: "Anthropic API key",
 			Base:        90,
 			Pattern:     `\bsk-ant-(?:api|admin)\d{2}-[A-Za-z0-9_-]{40,}\b`,
@@ -115,7 +127,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.openai-api-key",
-			Name:        "OpenAI API key",
+			Title:       "OpenAI API Key",
+			Category:    "OpenAI",
 			Description: "OpenAI project, service-account or admin key",
 			Base:        85,
 			Pattern:     `\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b`,
@@ -124,7 +137,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.gitlab-pat",
-			Name:        "GitLab personal access token",
+			Title:       "GitLab Personal Access Token",
+			Category:    "GitLab",
 			Description: "GitLab personal access token",
 			Base:        85,
 			Pattern:     `\bglpat-[A-Za-z0-9_-]{20}\b`,
@@ -135,7 +149,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.npm-token",
-			Name:        "npm token",
+			Title:       "npm Token",
+			Category:    "npm",
 			Description: "npm registry access token",
 			Base:        85,
 			Pattern:     `\bnpm_[A-Za-z0-9]{36}\b`,
@@ -146,7 +161,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.sendgrid-api-key",
-			Name:        "SendGrid API key",
+			Title:       "SendGrid API Key",
+			Category:    "SendGrid",
 			Description: "SendGrid API key",
 			Base:        85,
 			Pattern:     `\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b`,
@@ -157,7 +173,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.twilio-api-key",
-			Name:        "Twilio API key",
+			Title:       "Twilio API Key",
+			Category:    "Twilio",
 			Description: "Twilio API key SID",
 			Base:        70,
 			Pattern:     `\bSK[0-9a-fA-F]{32}\b`,
@@ -168,7 +185,8 @@ func HighPrecisionRules() []*Rule {
 		},
 		{
 			ID:          "secret.azure-storage-key",
-			Name:        "Azure storage account key",
+			Title:       "Azure Storage Account Key",
+			Category:    "Azure",
 			Description: "Azure Storage connection string account key",
 			Base:        85,
 			Pattern:     `AccountKey=([A-Za-z0-9+/=]{86,90})`,
@@ -177,21 +195,25 @@ func HighPrecisionRules() []*Rule {
 			MaxLen:      90,
 			EntropyMin:  4.0,
 		},
-	}
-}
-
-// GenericRules returns the opt-in, low-precision detectors.
-//
-// These match a shape rather than a provider, so they are the ones that
-// generate noise. They are kept out of the default set so the default output
-// stays actionable; enabling them is an explicit trade of precision for recall.
-func GenericRules() []*Rule {
-	return []*Rule{
+		{
+			ID:          "secret.jwt",
+			Title:       "JSON Web Token",
+			Category:    "JWT",
+			Description: "Signed JWT in a response body",
+			Base:        55,
+			Pattern:     `\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{0,}\b`,
+			MinLen:      25,
+			EntropyMin:  3.0,
+			// A JWT is only interesting if its header actually parses as JWT
+			// metadata; a random "eyJ..." triple is not a token.
+			Validate: validateJWT,
+		},
 		{
 			ID:          "secret.generic-assignment",
-			Name:        "Assigned credential",
+			Title:       "Assigned Credential",
+			Category:    "Generic Secret",
 			Description: "Keyword assignment holding a high-entropy value",
-			Base:        55,
+			Base:        50,
 			Pattern:     `(?i)\b(?:api[_-]?key|apikey|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|password|passwd)\b\s*[:=]\s*["']([^"'\r\n]{12,128})["']`,
 			Group:       1,
 			MinLen:      12,
@@ -201,9 +223,10 @@ func GenericRules() []*Rule {
 		},
 		{
 			ID:          "secret.generic-high-entropy",
-			Name:        "High-entropy string",
+			Title:       "High-Entropy String",
+			Category:    "Generic Secret",
 			Description: "Long random-looking string with no provider identity",
-			Base:        45,
+			Base:        40,
 			Pattern:     `\b[A-Za-z0-9+/_-]{40,64}\b`,
 			MinLen:      40,
 			MaxLen:      64,
@@ -245,4 +268,29 @@ func pemLabel(block, marker string) (string, bool) {
 		return "", false
 	}
 	return rest[:end], true
+}
+
+// validateJWT adds confidence only when the header segment decodes to JSON that
+// names a signing algorithm.
+func validateJWT(_, payload string) (confidence.Signal, bool) {
+	parts := strings.Split(payload, ".")
+	if len(parts) != 3 {
+		return confidence.Signal{}, false
+	}
+	header, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return confidence.Signal{}, false
+	}
+	var parsed struct {
+		Alg string `json:"alg"`
+		Typ string `json:"typ"`
+	}
+	if err := json.Unmarshal(header, &parsed); err != nil || parsed.Alg == "" {
+		return confidence.Signal{}, false
+	}
+	return confidence.Signal{
+		Name:   "structural",
+		Delta:  10,
+		Reason: "JWT header decodes and declares alg=" + parsed.Alg,
+	}, true
 }

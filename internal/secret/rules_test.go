@@ -7,10 +7,10 @@ import (
 )
 
 func TestRuleSetInvariants(t *testing.T) {
-	all := append(HighPrecisionRules(), GenericRules()...)
-	seen := make(map[string]struct{}, len(all))
+	rules := Rules()
+	seen := make(map[string]struct{}, len(rules))
 
-	for _, rule := range all {
+	for _, rule := range rules {
 		t.Run(rule.ID, func(t *testing.T) {
 			if rule.ID == "" || !strings.HasPrefix(rule.ID, "secret.") {
 				t.Fatalf("rule ID %q must be namespaced", rule.ID)
@@ -20,8 +20,8 @@ func TestRuleSetInvariants(t *testing.T) {
 			}
 			seen[rule.ID] = struct{}{}
 
-			if rule.Name == "" || rule.Description == "" {
-				t.Fatal("rule needs a name and a description")
+			if rule.Title == "" || rule.Category == "" || rule.Description == "" {
+				t.Fatal("rule needs a title, category and description")
 			}
 			if rule.Base <= 0 || rule.Base > 100 {
 				t.Fatalf("base confidence %v outside (0, 100]", rule.Base)
@@ -34,18 +34,8 @@ func TestRuleSetInvariants(t *testing.T) {
 			if rule.Group > re.NumSubexp() {
 				t.Fatalf("group %d does not exist (pattern has %d)", rule.Group, re.NumSubexp())
 			}
-			if rule.Group > 0 {
-				// A capture-group rule must not also be anchored to the whole
-				// match, otherwise stripping prefixes breaks.
-				if rule.Group == 0 {
-					t.Fatal("unreachable")
-				}
-			}
 			if rule.EntropyMin < 0 || rule.EntropyMin > 8 {
 				t.Fatalf("entropy floor %v outside [0, 8]", rule.EntropyMin)
-			}
-			if rule.MinLen < 0 || rule.MaxLen < 0 {
-				t.Fatal("negative length bound")
 			}
 			if rule.MaxLen > 0 && rule.MinLen > rule.MaxLen {
 				t.Fatalf("MinLen %d > MaxLen %d", rule.MinLen, rule.MaxLen)
@@ -54,18 +44,16 @@ func TestRuleSetInvariants(t *testing.T) {
 	}
 }
 
-func TestHighPrecisionRulesAreNotGeneric(t *testing.T) {
-	for _, rule := range HighPrecisionRules() {
-		if rule.Generic {
-			t.Errorf("%s is marked generic but sits in the default set", rule.ID)
-		}
-	}
-}
-
-func TestGenericRulesAreMarked(t *testing.T) {
-	for _, rule := range GenericRules() {
+func TestGenericRulesStayBelowDefaultThreshold(t *testing.T) {
+	// The design contract: generic shape rules must not reach the default
+	// display threshold on their own, otherwise they would flood normal runs.
+	for _, rule := range Rules() {
 		if !rule.Generic {
-			t.Errorf("%s must be marked generic", rule.ID)
+			continue
+		}
+		best := rule.Base + 5 // maximum entropy bonus, no structural signal
+		if best >= 60 {
+			t.Errorf("%s can reach %v, which clears the default threshold", rule.ID, best)
 		}
 	}
 }
@@ -73,10 +61,20 @@ func TestGenericRulesAreMarked(t *testing.T) {
 func TestRuleSetsAreIndependent(t *testing.T) {
 	// Callers must be able to mutate the returned slice without corrupting the
 	// next caller's view.
-	first := HighPrecisionRules()
+	first := Rules()
 	first[0] = nil
-	second := HighPrecisionRules()
+	second := Rules()
 	if second[0] == nil {
 		t.Fatal("rule slices share backing storage")
+	}
+}
+
+func TestNewValidatesRules(t *testing.T) {
+	scanner, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if len(scanner.Rules()) != len(Rules()) {
+		t.Fatalf("scanner has %d rules, want %d", len(scanner.Rules()), len(Rules()))
 	}
 }

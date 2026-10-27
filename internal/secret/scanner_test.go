@@ -5,8 +5,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,19 +29,16 @@ func seq(n int, alphabet string, stride int) string {
 	return b.String()
 }
 
-func newScanner(t *testing.T, opts Options) *Scanner {
+func newScanner(t *testing.T) *Scanner {
 	t.Helper()
-	scanner, err := New(opts)
+	scanner, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return scanner
 }
 
-// assertSingleFinding fails unless the result holds exactly one finding for the
-// expected rule. Extra findings are treated as failures: collateral matches are
-// how a detector loses precision.
-func assertSingleFinding(t *testing.T, result FileResult, wantRule string) findingView {
+func mustSingle(t *testing.T, result Result, wantRule string) findingView {
 	t.Helper()
 	if len(result.Findings) != 1 {
 		t.Fatalf("findings = %d, want 1: %+v", len(result.Findings), result.Findings)
@@ -52,50 +47,57 @@ func assertSingleFinding(t *testing.T, result FileResult, wantRule string) findi
 	if f.RuleID != wantRule {
 		t.Fatalf("rule = %q, want %q", f.RuleID, wantRule)
 	}
-	return findingView{f.RuleID, f.Confidence.Value, f.Match, f.Fingerprint}
+	return findingView{f.Category, f.Title, f.Confidence.Value, f.Value, f.Context}
 }
 
 type findingView struct {
-	ruleID      string
-	confidence  float64
-	match       string
-	fingerprint string
+	category   string
+	title      string
+	confidence float64
+	value      string
+	context    string
 }
 
 func TestVendorTokenRules(t *testing.T) {
-	scanner := newScanner(t, Options{})
+	scanner := newScanner(t)
 
 	cases := []struct {
-		name       string
-		value      string
-		rule       string
-		confidence float64
+		name     string
+		value    string
+		rule     string
+		category string
 	}{
-		{"aws access key id", "AKIA" + seq(16, upperNum, 11), "secret.aws-access-key-id", 85},
-		{"github token", "ghp_" + seq(36, alphaNum, 29), "secret.github-token", 90},
-		{"github fine-grained pat", "github_pat_" + seq(22, alphaNum, 29) + "_" + seq(59, alphaNum, 29), "secret.github-fine-grained-pat", 90},
-		{"slack token", "xoxb-" + seq(40, alphaNumDash, 29), "secret.slack-token", 85},
-		{"google api key", "AIza" + seq(35, alphaNumDash, 29), "secret.google-api-key", 80},
-		{"stripe live key", "sk_live_" + seq(24, alphaNum, 29), "secret.stripe-live-key", 90},
-		{"anthropic api key", "sk-ant-api03-" + seq(95, alphaNum, 29), "secret.anthropic-api-key", 90},
-		{"openai api key", "sk-proj-" + seq(60, alphaNum, 29), "secret.openai-api-key", 85},
-		{"gitlab pat", "glpat-" + seq(20, alphaNum, 29), "secret.gitlab-pat", 85},
-		{"npm token", "npm_" + seq(36, alphaNum, 29), "secret.npm-token", 85},
-		{"sendgrid key", "SG." + seq(22, alphaNum, 29) + "." + seq(43, alphaNum, 29), "secret.sendgrid-api-key", 85},
-		{"twilio api key", "SK" + seq(32, hexLower, 11), "secret.twilio-api-key", 70},
-		{"azure storage key", "AccountKey=" + seq(88, alphaNum, 29), "secret.azure-storage-key", 85},
+		{"aws access key id", "AKIA" + seq(16, upperNum, 11), "secret.aws-access-key-id", "AWS"},
+		{"github token", "ghp_" + seq(36, alphaNum, 29), "secret.github-token", "GitHub"},
+		{"github fine-grained pat", "github_pat_" + seq(22, alphaNum, 29) + "_" + seq(59, alphaNum, 29), "secret.github-fine-grained-pat", "GitHub"},
+		{"slack token", "xoxb-" + seq(40, alphaNumDash, 29), "secret.slack-token", "Slack"},
+		{"google api key", "AIza" + seq(35, alphaNumDash, 29), "secret.google-api-key", "Google"},
+		{"stripe live key", "sk_live_" + seq(24, alphaNum, 29), "secret.stripe-live-key", "Stripe"},
+		{"anthropic api key", "sk-ant-api03-" + seq(95, alphaNum, 29), "secret.anthropic-api-key", "Anthropic"},
+		{"openai api key", "sk-proj-" + seq(60, alphaNum, 29), "secret.openai-api-key", "OpenAI"},
+		{"gitlab pat", "glpat-" + seq(20, alphaNum, 29), "secret.gitlab-pat", "GitLab"},
+		{"npm token", "npm_" + seq(36, alphaNum, 29), "secret.npm-token", "npm"},
+		{"sendgrid key", "SG." + seq(22, alphaNum, 29) + "." + seq(43, alphaNum, 29), "secret.sendgrid-api-key", "SendGrid"},
+		{"twilio api key", "SK" + seq(32, hexLower, 11), "secret.twilio-api-key", "Twilio"},
+		{"azure storage key", "AccountKey=" + seq(88, alphaNum, 29), "secret.azure-storage-key", "Azure"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			content := "api_key = \"" + c.value + "\"\n"
-			result := scanner.ScanText("internal/app/config.go", []byte(content))
-			got := assertSingleFinding(t, result, c.rule)
-			if got.confidence != c.confidence {
-				t.Fatalf("confidence = %v, want %v", got.confidence, c.confidence)
+			body := `const apiKey = "` + c.value + `";`
+			result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(body)})
+			got := mustSingle(t, result, c.rule)
+			if got.category != c.category {
+				t.Fatalf("category = %q, want %q", got.category, c.category)
 			}
-			if !strings.Contains(got.match, "*") {
-				t.Fatalf("match %q is not redacted", got.match)
+			if got.title == "" {
+				t.Fatal("finding has no title")
+			}
+			if got.context == "" {
+				t.Fatal("finding has no context snippet")
+			}
+			if got.confidence < 60 {
+				t.Fatalf("confidence = %v, want at least the default threshold", got.confidence)
 			}
 		})
 	}
@@ -112,293 +114,208 @@ func testPrivateKeyPEM(t *testing.T) string {
 }
 
 func TestPrivateKeyRule(t *testing.T) {
-	scanner := newScanner(t, Options{})
+	scanner := newScanner(t)
 
 	t.Run("real key block", func(t *testing.T) {
 		block := testPrivateKeyPEM(t)
-		result := scanner.ScanText("deploy/id_rsa", []byte(block))
+		result := scanner.Scan(Document{Source: "https://target.test/id_rsa", Body: []byte(block)})
 		if len(result.Findings) != 1 {
-			t.Fatalf("findings = %d, want 1", len(result.Findings))
+			t.Fatalf("findings = %d, want 1 (reasons %+v)", len(result.Findings), result.ByReason)
 		}
 		f := result.Findings[0]
 		if f.RuleID != "secret.private-key" {
 			t.Fatalf("rule = %q", f.RuleID)
 		}
-		if f.Confidence.Value != 95 {
-			t.Fatalf("confidence = %v, want 95", f.Confidence.Value)
+		if f.Confidence.Value < 90 {
+			t.Fatalf("confidence = %v, want critical", f.Confidence.Value)
 		}
-		if f.Match != "-----BEGIN RSA PRIVATE KEY----- [body redacted]" {
-			t.Fatalf("match = %q, want header only", f.Match)
+		if f.Value != "-----BEGIN RSA PRIVATE KEY-----" {
+			t.Fatalf("value = %q, want the header only", f.Value)
 		}
-		body := strings.Split(block, "\n")[1]
-		if body != "" && strings.Contains(f.Match, body) {
-			t.Fatal("redacted match leaks key material")
+		if strings.Contains(f.Context, "MII") {
+			t.Fatal("context leaks key material")
 		}
 	})
 
 	t.Run("body too small", func(t *testing.T) {
-		content := "-----BEGIN RSA PRIVATE KEY-----\nQUJD\n-----END RSA PRIVATE KEY-----\n"
-		result := scanner.ScanText("notes.txt", []byte(content))
+		body := "-----BEGIN RSA PRIVATE KEY-----\nQUJD\n-----END RSA PRIVATE KEY-----\n"
+		result := scanner.Scan(Document{Source: "https://target.test/notes.txt", Body: []byte(body)})
 		if len(result.Findings) != 0 {
 			t.Fatalf("findings = %d, want 0", len(result.Findings))
 		}
-		if result.Stats.ByReason["structure"] != 1 {
-			t.Fatalf("reasons = %+v, want one structural rejection", result.Stats.ByReason)
+		if result.ByReason["structure"] != 1 {
+			t.Fatalf("reasons = %+v, want one structural rejection", result.ByReason)
 		}
 	})
 
 	t.Run("mismatched labels", func(t *testing.T) {
 		block := testPrivateKeyPEM(t)
-		content := strings.Replace(block, "-----END RSA PRIVATE KEY-----", "-----END EC PRIVATE KEY-----", 1)
-		if content == block {
+		body := strings.Replace(block, "-----END RSA PRIVATE KEY-----", "-----END EC PRIVATE KEY-----", 1)
+		if body == block {
 			t.Fatal("test setup: footer not replaced")
 		}
-		result := scanner.ScanText("notes.txt", []byte(content))
+		result := scanner.Scan(Document{Source: "https://target.test/notes.txt", Body: []byte(body)})
 		if len(result.Findings) != 0 {
 			t.Fatalf("findings = %d, want 0", len(result.Findings))
 		}
-		if result.Stats.ByReason["structure"] != 1 {
-			t.Fatalf("reasons = %+v, want one structural rejection", result.Stats.ByReason)
-		}
-	})
-
-	t.Run("unterminated header", func(t *testing.T) {
-		content := "-----BEGIN RSA PRIVATE KEY-----\nQUJD\n"
-		result := scanner.ScanText("notes.txt", []byte(content))
-		if len(result.Findings) != 0 {
-			t.Fatalf("findings = %d, want 0", len(result.Findings))
+		if result.ByReason["structure"] != 1 {
+			t.Fatalf("reasons = %+v, want one structural rejection", result.ByReason)
 		}
 	})
 }
 
-func TestFalsePositivesAreSuppressed(t *testing.T) {
-	scanner := newScanner(t, Options{})
+func TestHardSuppression(t *testing.T) {
+	scanner := newScanner(t)
 
 	cases := []struct {
 		name   string
-		path   string
-		value  string
+		source string
+		body   string
 		reason string
 	}{
-		{"aws documentation example", "internal/aws/client.go", "AKIAIOSFODNN7EXAMPLE", "placeholder"},
-		{"padded github token", "app.go", "ghp_" + strings.Repeat("x", 36), "degenerate"},
-		{"padded stripe key", "app.go", "sk_live_" + strings.Repeat("a", 24), "degenerate"},
-		{"stripe test key", "app.go", "sk_test_" + seq(24, alphaNum, 29), "below-threshold"},
-		{"token too short", "app.go", "ghp_" + seq(20, alphaNum, 29), ""},
-		{"google key too short", "app.go", "AIza" + seq(34, alphaNumDash, 29), ""},
+		{"aws documentation example", "https://target.test/app.js", `const id = "AKIAIOSFODNN7EXAMPLE";`, "placeholder"},
+		{"padded github token", "https://target.test/app.js", `const t = "ghp_` + strings.Repeat("x", 36) + `";`, "degenerate"},
+		{"padded stripe key", "https://target.test/app.js", `const k = "sk_live_` + strings.Repeat("a", 24) + `";`, "degenerate"},
+		{"low entropy live key", "https://target.test/app.js", `const k = "sk_live_` + strings.Repeat("ab", 12) + `";`, "degenerate"},
+		{"commented out token", "https://target.test/app.js", `// const t = "` + "ghp_" + seq(36, alphaNum, 29) + `";`, "comment"},
+		{"html comment token", "https://target.test/index.html", `<!-- token ` + "ghp_" + seq(36, alphaNum, 29) + ` -->`, "comment"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			result := scanner.ScanText(c.path, []byte("key = \""+c.value+"\"\n"))
+			result := scanner.Scan(Document{Source: c.source, Body: []byte(c.body)})
 			if len(result.Findings) != 0 {
 				t.Fatalf("findings = %d, want 0: %+v", len(result.Findings), result.Findings)
 			}
-			if c.reason != "" && result.Stats.ByReason[c.reason] == 0 {
-				t.Fatalf("reasons = %+v, want %q", result.Stats.ByReason, c.reason)
+			if result.ByReason[c.reason] == 0 {
+				t.Fatalf("reasons = %+v, want %q", result.ByReason, c.reason)
 			}
 		})
 	}
 }
 
-func TestPathPenaltyLowersButKeepsFinding(t *testing.T) {
-	scanner := newScanner(t, Options{})
+func TestURLSchemeIsNotAComment(t *testing.T) {
+	scanner := newScanner(t)
 	token := "ghp_" + seq(36, alphaNum, 29)
-	content := "token = \"" + token + "\"\n"
+	body := `const base = "https://api.target.test/v1"; const token = "` + token + `";`
+
+	result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(body)})
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v (reasons %+v)", len(result.Findings), result.Findings, result.ByReason)
+	}
+}
+
+func TestTokenOnCodeLineIsNotAComment(t *testing.T) {
+	scanner := newScanner(t)
+	token := "ghp_" + seq(36, alphaNum, 29)
+	body := "const a = 1 // note\nconst token = \"" + token + "\";\n"
+
+	result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(body)})
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1 (the next line is not a comment)", len(result.Findings))
+	}
+}
+
+func TestLowConfidenceIsReturnedNotHidden(t *testing.T) {
+	scanner := newScanner(t)
+	body := `const k = "sk_test_` + seq(24, alphaNum, 29) + `";`
+
+	result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(body)})
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(result.Findings))
+	}
+	if got := result.Findings[0].Confidence.Value; got >= 60 {
+		t.Fatalf("stripe test key scored %v, want below the default threshold", got)
+	}
+}
+
+func TestJWTStructure(t *testing.T) {
+	scanner := newScanner(t)
+	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwx"
+	body := `localStorage.setItem("token", "` + token + `");`
+
+	result := scanner.Scan(Document{Source: "https://target.test/app.js", Body: []byte(body)})
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v", len(result.Findings), result.Findings)
+	}
+	f := result.Findings[0]
+	if f.RuleID != "secret.jwt" || f.Category != "JWT" {
+		t.Fatalf("rule/category = %q/%q", f.RuleID, f.Category)
+	}
+
+	structural := false
+	for _, signal := range f.Confidence.Signals {
+		if signal.Name == "structural" && signal.Delta > 0 {
+			structural = true
+		}
+	}
+	if !structural {
+		t.Fatalf("signals = %+v, want a structural bonus from the decoded header", f.Confidence.Signals)
+	}
+}
+
+func TestEntropyGrading(t *testing.T) {
+	rule := &Rule{Base: 80, EntropyMin: 3.0}
 
 	cases := []struct {
-		path string
-		want float64
+		payload string
+		want    float64
 	}{
-		{"internal/app/config.go", 90},
-		{"testdata/fixture.go", 70},
-		{"examples/demo.env", 80},
-		{"README.md", 80},
+		{"abcdefghij", 72},                       // 3.32 bits: just above the floor
+		{"abcdefghijklmnopqrst", 80},             // 4.32 bits: neutral
+		{"abcdefghijklmnopqrstuvwxyz012345", 85}, // 5.0 bits: clearly random
 	}
 	for _, c := range cases {
-		result := scanner.ScanText(c.path, []byte(content))
-		if len(result.Findings) != 1 {
-			t.Fatalf("%s: findings = %d, want 1", c.path, len(result.Findings))
-		}
-		if got := result.Findings[0].Confidence.Value; got != c.want {
-			t.Errorf("%s: confidence = %v, want %v", c.path, got, c.want)
+		score := scoreCandidate(rule, "", c.payload, Entropy(c.payload))
+		if score.Value != c.want {
+			t.Errorf("payload %q (%0.2f bits) scored %v, want %v", c.payload, Entropy(c.payload), score.Value, c.want)
 		}
 	}
 }
 
-func TestGenericRulesetIsOptIn(t *testing.T) {
-	value := seq(20, alphaNum, 29)
-	content := "password = \"" + value + "\"\n"
+func TestContextSnippet(t *testing.T) {
+	body := strings.Repeat("a", 100) + "SECRET" + strings.Repeat("b", 100)
+	got := Context(body, 100, 106, 30)
 
-	def := newScanner(t, Options{})
-	if result := def.ScanText("config.py", []byte(content)); len(result.Findings) != 0 {
-		t.Fatalf("default scanner reported %d findings for a generic assignment", len(result.Findings))
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, "...") {
+		t.Fatalf("context = %q, want ellipsis on both sides", got)
 	}
-
-	generic := newScanner(t, Options{IncludeGeneric: true})
-	result := generic.ScanText("config.py", []byte(content))
-	if len(result.Findings) != 1 {
-		t.Fatalf("findings = %d, want 1", len(result.Findings))
+	if !strings.Contains(got, "SECRET") {
+		t.Fatalf("context = %q, missing the match", got)
 	}
-	f := result.Findings[0]
-	if f.RuleID != "secret.generic-assignment" {
-		t.Fatalf("rule = %q", f.RuleID)
+	if len([]rune(got)) > 30+6+30+6 {
+		t.Fatalf("context = %q, longer than requested", got)
 	}
-	if f.Confidence.Value != 45 {
-		t.Fatalf("confidence = %v, want 45 (55 base, -10 generic)", f.Confidence.Value)
-	}
-	if len(f.Confidence.Signals) != 1 || f.Confidence.Signals[0].Name != "generic-rule" {
-		t.Fatalf("signals = %+v", f.Confidence.Signals)
-	}
-	if strings.Contains(f.Match, "password") {
-		t.Errorf("match %q still shows the keyword instead of the secret", f.Match)
-	}
-	if !strings.HasPrefix(f.Match, value[:4]) {
-		t.Errorf("match %q lost the secret head", f.Match)
-	}
-	if want := strings.Index(content, value) + 1; f.Column != want {
-		t.Errorf("column = %d, want %d (start of the captured value)", f.Column, want)
-	}
-
-	placeholder := generic.ScanText("config.py", []byte("password = \"changeme123456\"\n"))
-	if len(placeholder.Findings) != 0 {
-		t.Fatalf("placeholder reported as finding: %+v", placeholder.Findings)
-	}
-	if placeholder.Stats.ByReason["placeholder"] == 0 {
-		t.Fatalf("reasons = %+v, want placeholder", placeholder.Stats.ByReason)
+	if collapsed := Context("a\n\n\t  b", 0, 1, 40); strings.Contains(collapsed, "\n") {
+		t.Fatalf("context %q kept a newline", collapsed)
 	}
 }
 
-func TestLocationsAndRedaction(t *testing.T) {
-	scanner := newScanner(t, Options{})
-	token := "ghp_" + seq(36, alphaNum, 29)
-	content := "package x\n\nvar token = \"" + token + "\"\n\nvar again = \"" + token + "\"\n"
-
-	result := scanner.ScanText("internal/app/config.go", []byte(content))
-	if len(result.Findings) != 2 {
-		t.Fatalf("findings = %d, want 2", len(result.Findings))
+func TestMask(t *testing.T) {
+	cases := []struct {
+		value string
+		want  string
+	}{
+		{"AKIAQ3EGVZ7J4K2WN5TP", "AKIA************N5TP"},
+		{"short", "*****"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := Mask(c.value); got != c.want {
+			t.Errorf("Mask(%q) = %q, want %q", c.value, got, c.want)
+		}
 	}
 
-	first := result.Findings[0]
-	if first.Line != 3 {
-		t.Errorf("line = %d, want 3", first.Line)
-	}
-	if first.Column != 14 {
-		t.Errorf("column = %d, want 14", first.Column)
-	}
-	if !strings.HasPrefix(first.Match, "ghp_") {
-		t.Errorf("match %q lost its prefix", first.Match)
-	}
-	if !strings.HasSuffix(first.Match, token[len(token)-2:]) {
-		t.Errorf("match %q lost its suffix", first.Match)
-	}
-	if strings.Contains(first.Match, token[8:30]) {
-		t.Errorf("match %q leaks the secret body", first.Match)
-	}
-	if want := Fingerprint(token[len("ghp_"):]); first.Fingerprint != want {
-		t.Errorf("fingerprint = %q, want %q", first.Fingerprint, want)
-	}
-	if second := result.Findings[1]; second.Line != 5 {
-		t.Errorf("second line = %d, want 5", second.Line)
+	masked := Mask("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----")
+	if masked != "-----BEGIN RSA PRIVATE KEY-----" {
+		t.Errorf("Mask(PEM) = %q", masked)
 	}
 }
 
-func TestCaptureGroupDrivesReportedValue(t *testing.T) {
-	scanner := newScanner(t, Options{})
-	key := seq(88, alphaNum, 29)
-	content := `connection = "DefaultEndpointsProtocol=https;AccountKey=` + key + `;EndpointSuffix=core.windows.net"` + "\n"
-
-	result := scanner.ScanText("app/config.go", []byte(content))
-	if len(result.Findings) != 1 {
-		t.Fatalf("findings = %d, want 1", len(result.Findings))
-	}
-	f := result.Findings[0]
-	if strings.Contains(f.Match, "AccountKey") {
-		t.Errorf("match %q shows the surrounding syntax", f.Match)
-	}
-	if !strings.HasPrefix(f.Match, key[:4]) {
-		t.Errorf("match %q lost the key head", f.Match)
-	}
-	if !strings.HasSuffix(f.Match, key[len(key)-2:]) {
-		t.Errorf("match %q lost the key tail", f.Match)
-	}
-	if want := strings.Index(content, key) + 1; f.Column != want {
-		t.Errorf("column = %d, want %d", f.Column, want)
-	}
-}
-
-func TestBinaryAndEmptyInput(t *testing.T) {
-	scanner := newScanner(t, Options{})
-	token := []byte("ghp_" + seq(36, alphaNum, 29))
-
-	binary := append(append([]byte{}, token...), 0x00, 0x01)
-	result := scanner.ScanText("blob.bin", binary)
-	if len(result.Findings) != 0 {
+func TestBinaryInput(t *testing.T) {
+	scanner := newScanner(t)
+	body := append([]byte("ghp_"+seq(36, alphaNum, 29)), 0x00, 0x01)
+	if result := scanner.Scan(Document{Source: "https://target.test/blob", Body: body}); len(result.Findings) != 0 {
 		t.Fatalf("binary input produced findings")
-	}
-	if result.Stats.FilesSkipped != 1 {
-		t.Fatalf("skipped = %d, want 1", result.Stats.FilesSkipped)
-	}
-
-	empty := scanner.ScanText("empty.go", nil)
-	if len(empty.Findings) != 0 || empty.Stats.FilesScanned != 1 {
-		t.Fatalf("empty input: findings=%d scanned=%d", len(empty.Findings), empty.Stats.FilesScanned)
-	}
-}
-
-func TestScanPathsWalksAndSkipsNoise(t *testing.T) {
-	scanner := newScanner(t, Options{})
-	root := t.TempDir()
-	token := "ghp_" + seq(36, alphaNum, 29)
-
-	write := func(rel, content string) {
-		t.Helper()
-		full := filepath.Join(root, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-
-	write(filepath.Join("app", "config.env"), "token = \""+token+"\"\n")
-	write(filepath.Join(".git", "config"), "token = \""+token+"\"\n")
-	write(filepath.Join("node_modules", "pkg", "index.js"), "token = \""+token+"\"\n")
-	write(filepath.Join("assets", "logo.png"), "\x00\x01binary")
-
-	report, err := scanner.ScanPaths(t.Context(), []string{root})
-	if err != nil {
-		t.Fatalf("ScanPaths: %v", err)
-	}
-	if len(report.Findings) != 1 {
-		t.Fatalf("findings = %d, want 1: %+v", len(report.Findings), report.Findings)
-	}
-	if !strings.HasSuffix(report.Findings[0].File, filepath.Join("app", "config.env")) {
-		t.Fatalf("unexpected file %q", report.Findings[0].File)
-	}
-	if report.Stats.FilesScanned != 1 {
-		t.Fatalf("scanned = %d, want 1", report.Stats.FilesScanned)
-	}
-
-	single, err := scanner.ScanPaths(t.Context(), []string{filepath.Join(root, "app", "config.env")})
-	if err != nil {
-		t.Fatalf("ScanPaths single file: %v", err)
-	}
-	if len(single.Findings) != 1 {
-		t.Fatalf("single file findings = %d, want 1", len(single.Findings))
-	}
-
-	if _, err := scanner.ScanPaths(t.Context(), []string{filepath.Join(root, "does-not-exist")}); err == nil {
-		t.Fatal("missing path must return an error")
-	}
-}
-
-func TestNewRejectsInvalidRules(t *testing.T) {
-	if _, err := New(Options{MinConfidence: -1}); err != nil {
-		t.Fatalf("negative min confidence should fall back to the default: %v", err)
-	}
-	if _, err := New(Options{IncludeGeneric: true}); err != nil {
-		t.Fatalf("New with generic rules: %v", err)
 	}
 }

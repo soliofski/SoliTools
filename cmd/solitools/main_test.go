@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -31,7 +32,9 @@ func TestUsageErrors(t *testing.T) {
 		{},
 		{"bogus"},
 		{"scan"},
-		{"scan", "definitely-missing-path"},
+		{"scan", "https://example.com", "extra"},
+		{"scan", "-strict", "-all", "https://example.com"},
+		{"scan", "-min-score", "150", "https://example.com"},
 	}
 	for _, args := range cases {
 		if code, _, _ := runCLI(t, args...); code != 2 {
@@ -40,67 +43,67 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
-// fixture creates a directory holding one credential and returns its path.
-func fixture(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	// The token is assembled at runtime on purpose: this source file must not
-	// read as a leak itself, while the temporary file it writes still does.
-	payload := "Ab3xZ9qLmN2pR7sT4vW8" + "Kf6Yc1Dh5Ju0Ge3N"
-	content := "token = \"ghp_" + payload + "\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "config.env"), []byte(content), 0o600); err != nil {
-		t.Fatalf("write fixture: %v", err)
+func TestNormalizeTarget(t *testing.T) {
+	if got := normalizeTarget("example.com"); got != "https://example.com" {
+		t.Errorf("normalizeTarget = %q", got)
 	}
-	return dir
+	if got := normalizeTarget("http://example.com"); got != "http://example.com" {
+		t.Errorf("normalizeTarget changed an absolute URL: %q", got)
+	}
+}
+
+// leakingServer serves one page containing a credential split across literals
+// in this file, so the repository itself stays free of a matching string.
+func leakingServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	token := "ghp_Ab3xZ9qLmN2pR7sT4vW8" + "Kf6Yc1Dh5Ju0Ge3N"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><script>var t = %q;</script></body></html>", token)
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
 func TestScanReportsFindings(t *testing.T) {
-	dir := fixture(t)
-	code, stdout, _ := runCLI(t, "scan", dir)
+	server := leakingServer(t)
+	code, stdout, stderr := runCLI(t, "scan", "-rate", "500", "-skip-path", server.URL+"/")
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+		t.Fatalf("exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "secret.github-token") {
-		t.Fatalf("stdout missing rule id:\n%s", stdout)
+	if !strings.Contains(stdout, "[SECRET]") {
+		t.Fatalf("stdout missing a secret finding:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "Findings: 1") {
-		t.Fatalf("stdout missing summary:\n%s", stdout)
+	if !strings.Contains(stdout, "***") {
+		t.Fatalf("secret value was not masked:\n%s", stdout)
 	}
-}
-
-func TestScanCleanDirectoryExitsZero(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	code, stdout, _ := runCLI(t, "scan", dir)
-	if code != 0 {
-		t.Fatalf("exit = %d, want 0:\n%s", code, stdout)
-	}
-	if !strings.Contains(stdout, "Findings: 0") {
-		t.Fatalf("stdout = %s", stdout)
+	if strings.Contains(stdout, "Kf6Yc1Dh5Ju0Ge3N") {
+		t.Fatalf("stdout leaks the secret:\n%s", stdout)
 	}
 }
 
 func TestScanJSON(t *testing.T) {
-	dir := fixture(t)
-	code, stdout, _ := runCLI(t, "scan", "--json", dir)
+	server := leakingServer(t)
+	code, stdout, stderr := runCLI(t, "scan", "-json", "-rate", "500", "-skip-path", server.URL+"/")
 	if code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, stderr)
 	}
 
 	var payload struct {
-		Version  string `json:"version"`
-		Findings []struct {
+		Version   string  `json:"version"`
+		Target    string  `json:"target"`
+		Threshold float64 `json:"threshold"`
+		Findings  []struct {
+			Kind       string `json:"kind"`
 			RuleID     string `json:"rule_id"`
-			Match      string `json:"match"`
+			Value      string `json:"value"`
 			Confidence struct {
 				Value float64 `json:"value"`
 				Band  string  `json:"band"`
 			} `json:"confidence"`
 		} `json:"findings"`
 		Stats struct {
-			FilesScanned int `json:"files_scanned"`
+			Requests int `json:"requests"`
 		} `json:"stats"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
@@ -109,32 +112,52 @@ func TestScanJSON(t *testing.T) {
 	if payload.Version != version {
 		t.Errorf("version = %q", payload.Version)
 	}
+	if payload.Threshold != 60 {
+		t.Errorf("threshold = %v, want the default 60", payload.Threshold)
+	}
 	if len(payload.Findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(payload.Findings))
 	}
-	if payload.Findings[0].RuleID != "secret.github-token" {
-		t.Errorf("rule = %q", payload.Findings[0].RuleID)
+	if payload.Findings[0].Kind != "SECRET" || payload.Findings[0].RuleID != "secret.github-token" {
+		t.Errorf("unexpected finding %+v", payload.Findings[0])
 	}
-	if payload.Findings[0].Confidence.Value != 90 || payload.Findings[0].Confidence.Band != "very-high" {
-		t.Errorf("confidence = %+v", payload.Findings[0].Confidence)
+	if !strings.Contains(payload.Findings[0].Value, "*") {
+		t.Errorf("JSON value is not masked: %q", payload.Findings[0].Value)
 	}
-	if strings.Contains(payload.Findings[0].Match, "Ab3xZ9qL") {
-		t.Errorf("JSON leaks the secret: %q", payload.Findings[0].Match)
-	}
-	if payload.Stats.FilesScanned != 1 {
-		t.Errorf("files scanned = %d", payload.Stats.FilesScanned)
+	if payload.Stats.Requests == 0 {
+		t.Errorf("stats.requests = 0, want the real count")
 	}
 }
 
-func TestScanMinConfidenceZeroUsesDefault(t *testing.T) {
-	dir := t.TempDir()
-	// A value that only the generic rules would match.
-	content := "password = \"Zx9Qm3Lp7Rn2Ts5Vw8Yb4\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "config.py"), []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	code, stdout, _ := runCLI(t, "scan", "--min-confidence", "0", dir)
+func TestScanCleanServerExitsZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html><body><p>nothing to see</p></body></html>")
+	}))
+	defer server.Close()
+
+	code, stdout, _ := runCLI(t, "scan", "-rate", "500", "-skip-path", server.URL+"/")
 	if code != 0 {
-		t.Fatalf("exit = %d, want 0 without the generic rule set:\n%s", code, stdout)
+		t.Fatalf("exit = %d, want 0:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "Findings: 0") {
+		t.Fatalf("stdout = %s", stdout)
+	}
+}
+
+func TestScanStrictHidesMediumHigh(t *testing.T) {
+	// A JWT scores 65: visible by default, hidden under -strict.
+	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0" + ".abcdefghijklmnopqrstuvwx"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body>%s</body></html>", token)
+	}))
+	defer server.Close()
+
+	if code, stdout, _ := runCLI(t, "scan", "-rate", "500", "-skip-path", server.URL+"/"); code != 1 {
+		t.Fatalf("default run exit = %d, want the JWT to be reported:\n%s", code, stdout)
+	}
+	if code, stdout, _ := runCLI(t, "scan", "-strict", "-rate", "500", "-skip-path", server.URL+"/"); code != 0 {
+		t.Fatalf("strict run exit = %d, want the JWT hidden:\n%s", code, stdout)
 	}
 }

@@ -14,17 +14,31 @@ func TestBandOf(t *testing.T) {
 		{0, BandLow},
 		{39.9, BandLow},
 		{40, BandMedium},
-		{69.9, BandMedium},
-		{70, BandHigh},
+		{59.9, BandMedium},
+		{60, BandMediumHigh},
+		{74.9, BandMediumHigh},
+		{75, BandHigh},
 		{89.9, BandHigh},
-		{90, BandVeryHigh},
-		{100, BandVeryHigh},
-		{250, BandVeryHigh},
+		{90, BandCritical},
+		{100, BandCritical},
+		{250, BandCritical},
 	}
 	for _, c := range cases {
 		if got := BandOf(c.value); got != c.want {
 			t.Errorf("BandOf(%v) = %q, want %q", c.value, got, c.want)
 		}
+	}
+}
+
+func TestThresholdsMatchBands(t *testing.T) {
+	if got := BandOf(ThresholdDefault); got != BandMediumHigh {
+		t.Errorf("default threshold %v falls in %q", ThresholdDefault, got)
+	}
+	if got := BandOf(ThresholdStrict); got != BandHigh {
+		t.Errorf("strict threshold %v falls in %q", ThresholdStrict, got)
+	}
+	if got := BandOf(ThresholdAll); got != BandLow {
+		t.Errorf("--all threshold %v falls in %q", ThresholdAll, got)
 	}
 }
 
@@ -40,8 +54,8 @@ func TestBuildAppliesSignalsInOrder(t *testing.T) {
 	if s.Base != 80 {
 		t.Fatalf("base = %v, want 80", s.Base)
 	}
-	if s.Band != BandMedium {
-		t.Fatalf("band = %q, want %q", s.Band, BandMedium)
+	if s.Band != BandMediumHigh {
+		t.Fatalf("band = %q, want %q", s.Band, BandMediumHigh)
 	}
 	if len(s.Signals) != 2 {
 		t.Fatalf("signals = %d, want 2", len(s.Signals))
@@ -58,11 +72,12 @@ func TestBuildClampsAndRounds(t *testing.T) {
 		want     float64
 		wantBand Band
 	}{
-		{95, []float64{20}, 100, BandVeryHigh},
+		{95, []float64{20}, 100, BandCritical},
 		{30, []float64{-20}, 10, BandLow},
 		{55, []float64{-10, -3.33}, 41.7, BandMedium},
 		{50, []float64{0.04}, 50, BandMedium},
-		{89.96, nil, 90, BandVeryHigh},
+		{89.96, nil, 90, BandCritical},
+		{74.96, nil, 75, BandHigh},
 	}
 	for _, c := range cases {
 		b := New(c.base)
@@ -86,6 +101,17 @@ func TestZeroDeltaIsIgnored(t *testing.T) {
 	}
 }
 
+func TestAddSignalHonoursOkFlag(t *testing.T) {
+	s := New(60).AddSignal(Signal{Name: "x", Delta: 5}, false).Build()
+	if len(s.Signals) != 0 {
+		t.Fatalf("signals = %+v, want none", s.Signals)
+	}
+	s = New(60).AddSignal(Signal{Name: "x", Delta: 5, Reason: "r"}, true).Build()
+	if s.Value != 65 || len(s.Signals) != 1 {
+		t.Fatalf("score = %+v, want 65 with one signal", s)
+	}
+}
+
 func TestBuildDoesNotAliasBuilderSignals(t *testing.T) {
 	b := New(60).Add("a", 5, "first")
 	first := b.Build()
@@ -104,12 +130,12 @@ func TestBuildDoesNotAliasBuilderSignals(t *testing.T) {
 }
 
 func TestAtLeast(t *testing.T) {
-	s := New(40).Build()
-	if !s.AtLeast(40) {
-		t.Error("AtLeast(40) = false, want true at the boundary")
+	s := New(60).Build()
+	if !s.AtLeast(60) {
+		t.Error("AtLeast(60) = false, want true at the boundary")
 	}
-	if s.AtLeast(40.1) {
-		t.Error("AtLeast(40.1) = true, want false")
+	if s.AtLeast(60.1) {
+		t.Error("AtLeast(60.1) = true, want false")
 	}
 }
 
@@ -120,8 +146,8 @@ func TestString(t *testing.T) {
 }
 
 func TestNaNBaseDoesNotPanic(t *testing.T) {
-	// Defensive: a NaN would otherwise propagate into comparisons and silently
-	// hide findings. clamp() maps it to the minimum band.
+	// Defensive: a NaN would otherwise fail every threshold comparison and
+	// silently hide findings. clamp() maps it to the minimum band instead.
 	s := New(math.NaN()).Build()
 	if math.IsNaN(s.Value) {
 		t.Fatalf("value is NaN")

@@ -1,11 +1,7 @@
 package secret
 
 import (
-	"context"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,133 +11,46 @@ import (
 	"solitools/internal/finding"
 )
 
-// Defaults for Options.
-const (
-	// DefaultMinConfidence hides findings below this score. It sits at the
-	// bottom of the medium band: beneath it a secret match is more likely to be
-	// a placeholder than a credential.
-	DefaultMinConfidence = 40.0
-	// DefaultMaxFileSize is the largest file read, in bytes.
-	DefaultMaxFileSize = 5 << 20
-)
+// MaxBody bounds how much of one document is scanned.
+const MaxBody = 5 << 20
 
-// DefaultIgnoreDirs are directory names skipped while walking. They hold
-// third-party or generated code where a match is rarely actionable.
-var DefaultIgnoreDirs = []string{".git", ".hg", ".svn", "node_modules", "vendor", ".venv", "__pycache__"}
-
-// binaryExts are skipped without being read. NUL detection would catch most of
-// them anyway, but the extension check avoids reading large media files at all.
-var binaryExts = map[string]struct{}{
-	".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {}, ".ico": {}, ".bmp": {},
-	".pdf": {}, ".zip": {}, ".gz": {}, ".tar": {}, ".7z": {}, ".rar": {},
-	".exe": {}, ".dll": {}, ".so": {}, ".dylib": {}, ".class": {}, ".jar": {}, ".pyc": {},
-	".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {},
-	".mp3": {}, ".mp4": {}, ".mov": {}, ".avi": {}, ".bin": {}, ".iso": {},
+// Document is one body to scan.
+type Document struct {
+	// Source is the URL (or path) the body came from; it is reported verbatim.
+	Source string
+	Body   []byte
 }
 
-// Options configures a Scanner.
-type Options struct {
-	// MinConfidence drops findings below this value. Zero selects
-	// DefaultMinConfidence; pass a small positive value to keep everything.
-	MinConfidence float64
-	// IncludeGeneric adds the low-precision generic rule set.
-	IncludeGeneric bool
-	// MaxFileSize is the largest file read, in bytes.
-	MaxFileSize int64
-	// IgnoreDirs replaces the default directory skip list when non-empty.
-	IgnoreDirs []string
-}
-
-func (o Options) normalized() Options {
-	if o.MinConfidence <= 0 {
-		o.MinConfidence = DefaultMinConfidence
-	}
-	if o.MaxFileSize <= 0 {
-		o.MaxFileSize = DefaultMaxFileSize
-	}
-	if len(o.IgnoreDirs) == 0 {
-		o.IgnoreDirs = DefaultIgnoreDirs
-	}
-	return o
-}
-
-// Stats summarizes a scan.
+// Result is the outcome of scanning one document.
 //
-// Suppressed findings are counted per reason so a filtered result is never
-// silently invisible: the summary always states how much was dropped and why.
-type Stats struct {
-	FilesScanned int            `json:"files_scanned"`
-	FilesSkipped int            `json:"files_skipped"`
-	BytesRead    int64          `json:"bytes_read"`
-	Findings     int            `json:"findings"`
-	Suppressed   int            `json:"suppressed"`
-	ByReason     map[string]int `json:"suppressed_by_reason,omitempty"`
+// Suppressed counts are reported per reason so a filtered credential is never
+// silently invisible: the total always says how much was dropped and why.
+type Result struct {
+	Findings   []finding.Finding
+	Suppressed int
+	ByReason   map[string]int
 }
 
-func (s *Stats) merge(other Stats) {
-	s.FilesScanned += other.FilesScanned
-	s.FilesSkipped += other.FilesSkipped
-	s.BytesRead += other.BytesRead
-	s.Findings += other.Findings
-	s.Suppressed += other.Suppressed
-	if len(other.ByReason) == 0 {
-		return
-	}
-	if s.ByReason == nil {
-		s.ByReason = make(map[string]int, len(other.ByReason))
-	}
-	for reason, count := range other.ByReason {
-		s.ByReason[reason] += count
-	}
-}
-
-// FileResult is the outcome of scanning one input.
-type FileResult struct {
-	Findings []finding.Finding
-	Stats    Stats
-}
-
-// Report is the outcome of scanning a set of paths.
-type Report struct {
-	Findings []finding.Finding `json:"findings"`
-	Stats    Stats             `json:"stats"`
-	// Warnings records inputs that could not be read. One unreadable file does
-	// not fail the run, but it is never hidden either.
-	Warnings []string `json:"warnings,omitempty"`
-}
-
-func (r *Report) mergeFile(res FileResult, warning string) {
-	if warning != "" {
-		r.Warnings = append(r.Warnings, warning)
-	}
-	r.Findings = append(r.Findings, res.Findings...)
-	r.Stats.merge(res.Stats)
-}
-
-// Scanner detects secrets in text.
+// Scanner detects credentials in text.
 //
-// A Scanner is immutable after New and safe for concurrent use.
+// A Scanner is immutable after New and safe for concurrent use. It applies
+// structural gates but no score threshold: filtering by confidence belongs to
+// the caller, so the same detector serves --strict, the default and --all.
 type Scanner struct {
-	opts  Options
 	rules []*Rule
 }
 
 // New builds a Scanner and validates its rule set.
-//
-// Rule IDs must be unique and every pattern must compile, so a broken rule is
-// an error at construction time rather than a panic mid-scan.
-func New(opts Options) (*Scanner, error) {
-	normalized := opts.normalized()
-
-	rules := HighPrecisionRules()
-	if normalized.IncludeGeneric {
-		rules = append(rules, GenericRules()...)
-	}
-
+func New() (*Scanner, error) {
+	rules := Rules()
 	seen := make(map[string]struct{}, len(rules))
+
 	for _, rule := range rules {
 		if rule.ID == "" {
 			return nil, fmt.Errorf("secret: rule with empty ID")
+		}
+		if rule.Title == "" || rule.Category == "" {
+			return nil, fmt.Errorf("secret: rule %q needs a title and category", rule.ID)
 		}
 		if _, duplicate := seen[rule.ID]; duplicate {
 			return nil, fmt.Errorf("secret: duplicate rule ID %q", rule.ID)
@@ -150,36 +59,38 @@ func New(opts Options) (*Scanner, error) {
 		if rule.Base <= 0 || rule.Base > confidence.MaxScore {
 			return nil, fmt.Errorf("secret: rule %q: base confidence %v outside (0, 100]", rule.ID, rule.Base)
 		}
-		if rule.Group < 0 {
-			return nil, fmt.Errorf("secret: rule %q: negative capture group", rule.ID)
-		}
-		if _, err := regexp.Compile(rule.Pattern); err != nil {
+		compiled, err := regexp.Compile(rule.Pattern)
+		if err != nil {
 			return nil, fmt.Errorf("secret: rule %q: %w", rule.ID, err)
+		}
+		if rule.Group < 0 || rule.Group > compiled.NumSubexp() {
+			return nil, fmt.Errorf("secret: rule %q: capture group %d does not exist", rule.ID, rule.Group)
 		}
 	}
 
-	return &Scanner{opts: normalized, rules: rules}, nil
+	return &Scanner{rules: rules}, nil
 }
 
 // Rules returns the active rule set. The slice must not be modified.
 func (s *Scanner) Rules() []*Rule { return s.rules }
 
-// ScanText scans content as if it lived at path.
-//
-// The path drives fixture heuristics and reported locations only; nothing is
-// read or written. This is the entry point used by tests and by in-memory
-// callers.
-func (s *Scanner) ScanText(path string, content []byte) FileResult {
-	result := FileResult{Stats: Stats{ByReason: make(map[string]int)}}
-	if isBinary(content) {
-		result.Stats.FilesSkipped = 1
+// Scan inspects one document and returns every candidate that passed the
+// structural gates, highest confidence first.
+func (s *Scanner) Scan(document Document) Result {
+	result := Result{ByReason: make(map[string]int)}
+	if len(document.Body) == 0 || isBinary(document.Body) {
 		return result
 	}
-	result.Stats.FilesScanned = 1
-	result.Stats.BytesRead = int64(len(content))
+	body := document.Body
+	if len(body) > MaxBody {
+		body = body[:MaxBody]
+	}
+	text := string(body)
 
-	text := string(content)
+	comments := indexComments(text, hashCommentSource(document.Source))
 	seen := make(map[string]struct{})
+	candidates := make([]candidate, 0, 16)
+	shields := shieldSpans(s.rules, text)
 
 	for _, rule := range s.rules {
 		for _, loc := range rule.Regexp().FindAllStringSubmatchIndex(text, -1) {
@@ -191,111 +102,142 @@ func (s *Scanner) ScanText(path string, content []byte) FileResult {
 			full := text[loc[0]:loc[1]]
 			captured := text[loc[group]:loc[group+1]]
 			payload := rule.StripPrefix(strings.TrimSpace(captured))
+			entropy := Entropy(payload)
 
-			if reason := s.suppressionReason(rule, full, payload); reason != "" {
-				result.Stats.Suppressed++
-				result.Stats.ByReason[reason]++
+			if reason := gate(rule, full, payload, entropy); reason != "" {
+				result.Suppressed++
+				result.ByReason[reason]++
 				continue
 			}
-
-			score := scoreCandidate(rule, full, payload, path)
-			if !score.AtLeast(s.opts.MinConfidence) {
-				result.Stats.Suppressed++
-				result.Stats.ByReason["below-threshold"]++
+			if !insideAny(loc[group], shields) && comments.contains(loc[group]) {
+				result.Suppressed++
+				result.ByReason["comment"]++
 				continue
 			}
 
 			line, column := lineColumn(text, matchAnchor(rule, loc))
-			key := fmt.Sprintf("%s\x00%d\x00%d\x00%s", path, line, column, rule.ID)
+			key := fmt.Sprintf("%s|%d|%d", rule.ID, line, column)
 			if _, duplicate := seen[key]; duplicate {
 				continue
 			}
 			seen[key] = struct{}{}
 
-			display := captured
+			value := captured
 			if rule.RedactFullMatch {
-				display = full
+				// Only the header is legible; the body is key material and must
+				// never reach a report, masked or not.
+				value = full
+				if newline := strings.IndexByte(value, '\n'); newline >= 0 {
+					value = value[:newline]
+				}
 			}
 
-			result.Findings = append(result.Findings, finding.Finding{
-				RuleID:      rule.ID,
-				RuleName:    rule.Name,
-				Description: rule.Description,
+			// For a block format the context is clamped to the header line:
+			// the surrounding characters are opaque key material.
+			contextStart, contextEnd := loc[group], loc[group+1]
+			contextLimit := len(text)
+			if rule.RedactFullMatch {
+				contextStart = loc[0]
+				contextEnd = loc[0] + len(full)
+				if newline := strings.IndexByte(full, '\n'); newline >= 0 {
+					contextEnd = loc[0] + newline
+				}
+				contextLimit = contextEnd
+			}
+
+			built := finding.Finding{
 				Kind:        finding.KindSecret,
-				File:        path,
-				Line:        line,
-				Column:      column,
-				Match:       Redact(display),
+				Category:    rule.Category,
+				RuleID:      rule.ID,
+				Title:       rule.Title,
+				URL:         document.Source,
+				Value:       strings.TrimSpace(value),
+				Context:     contextWithin(text, contextStart, contextEnd, ContextRadius, contextLimit),
 				Fingerprint: Fingerprint(payload),
-				Confidence:  score,
+				Confidence:  scoreCandidate(rule, full, payload, entropy),
+			}
+			built.WithField("Line", fmt.Sprintf("%d:%d", line, column))
+			if rule.EntropyMin > 0 {
+				built.WithField("Entropy", fmt.Sprintf("%.2f bits/symbol", entropy))
+			}
+			candidates = append(candidates, candidate{
+				finding: built,
+				generic: rule.Generic,
+				start:   loc[0],
+				end:     loc[1],
 			})
 		}
 	}
 
-	result.Stats.Findings = len(result.Findings)
+	// A credential must be reported once, under its strongest rule. Generic
+	// matches that overlap a provider-specific match are dropped here rather
+	// than deduplicated later, because their spans differ and a fingerprint
+	// comparison would miss them.
+	specific := make([]candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if !c.generic {
+			specific = append(specific, c)
+		}
+	}
+	for _, c := range candidates {
+		if c.generic && (overlapsAny(c, specific) || overlapsAny(c, shields)) {
+			result.Suppressed++
+			result.ByReason["superseded"]++
+			continue
+		}
+		result.Findings = append(result.Findings, c.finding)
+	}
+
 	sortFindings(result.Findings)
 	return result
 }
 
-// ScanPaths scans each path, expanding directories recursively.
-//
-// A missing root is an error; an unreadable file inside a tree is a warning.
-func (s *Scanner) ScanPaths(ctx context.Context, paths []string) (Report, error) {
-	report := Report{Stats: Stats{ByReason: make(map[string]int)}}
-
-	for _, root := range paths {
-		if err := ctx.Err(); err != nil {
-			return report, err
-		}
-
-		info, err := os.Stat(root)
-		if err != nil {
-			return report, fmt.Errorf("stat %q: %w", root, err)
-		}
-		if !info.IsDir() {
-			result, warning := s.scanFile(root)
-			report.mergeFile(result, warning)
-			continue
-		}
-
-		walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				report.Warnings = append(report.Warnings, fmt.Sprintf("%s: %v", path, err))
-				return nil
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if path != root && s.skipDir(entry.Name()) {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if !entry.Type().IsRegular() {
-				return nil
-			}
-			if s.skipExt(path) {
-				report.Stats.FilesSkipped++
-				return nil
-			}
-			result, warning := s.scanFile(path)
-			report.mergeFile(result, warning)
-			return nil
-		})
-		if walkErr != nil {
-			return report, walkErr
-		}
-	}
-
-	sortFindings(report.Findings)
-	report.Stats.Findings = len(report.Findings)
-	return report, nil
+// candidate pairs a finding with the span and rule class it came from.
+type candidate struct {
+	finding finding.Finding
+	generic bool
+	start   int
+	end     int
 }
 
-// suppressionReason applies a rule's hard gates. An empty result means the
+// shieldSpans collects the spans of block-format rules so generic detectors
+// stay silent inside them.
+func shieldSpans(rules []*Rule, text string) []candidate {
+	var spans []candidate
+	for _, rule := range rules {
+		if !rule.ShieldGeneric {
+			continue
+		}
+		for _, loc := range rule.Regexp().FindAllStringSubmatchIndex(text, -1) {
+			spans = append(spans, candidate{start: loc[0], end: loc[1]})
+		}
+	}
+	return spans
+}
+
+// insideAny reports whether offset falls inside one of spans.
+func insideAny(offset int, spans []candidate) bool {
+	for _, span := range spans {
+		if offset >= span.start && offset < span.end {
+			return true
+		}
+	}
+	return false
+}
+
+// overlapsAny reports whether c overlaps any candidate in others.
+func overlapsAny(c candidate, others []candidate) bool {
+	for _, other := range others {
+		if c.start < other.end && other.start < c.end {
+			return true
+		}
+	}
+	return false
+}
+
+// gate applies a rule's hard structural requirements. An empty result means the
 // candidate survives; otherwise the returned key is a stable stats label.
-func (s *Scanner) suppressionReason(rule *Rule, full, payload string) string {
+func gate(rule *Rule, full, payload string, entropy float64) string {
 	switch {
 	case payload == "":
 		return "empty-payload"
@@ -304,35 +246,49 @@ func (s *Scanner) suppressionReason(rule *Rule, full, payload string) string {
 	case rule.MaxLen > 0 && len(payload) > rule.MaxLen:
 		return "length"
 	}
+	if rule.Require != nil && !rule.Require(full, payload) {
+		return "structure"
+	}
+	if rule.ShieldGeneric {
+		// The payload is encoded binary, not a human-written value: placeholder
+		// words and repetition heuristics would produce random false negatives.
+		return ""
+	}
 	if _, ok := placeholderReason(payload); ok {
 		return "placeholder"
 	}
 	if isDegenerate(payload) {
 		return "degenerate"
 	}
-	if rule.EntropyMin > 0 && Entropy(payload) < rule.EntropyMin {
+	if rule.EntropyMin > 0 && entropy < rule.EntropyMin {
 		return "low-entropy"
-	}
-	if rule.Require != nil && !rule.Require(full, payload) {
-		return "structure"
 	}
 	return ""
 }
 
-// scoreCandidate derives a confidence score for a surviving candidate.
-func scoreCandidate(rule *Rule, full, payload, path string) confidence.Score {
+// scoreCandidate derives a confidence score for a candidate that passed the
+// gates. Entropy is graded rather than only gated: a value that clears its floor
+// by a hair is genuinely weaker evidence than one that is far above it.
+func scoreCandidate(rule *Rule, full, payload string, entropy float64) confidence.Score {
 	builder := confidence.New(rule.Base)
+
 	if rule.Generic {
 		builder.Add("generic-rule", -10, "generic pattern without provider identity")
 	}
-	if delta, reason := pathPenalty(path); delta != 0 {
-		builder.Add("path-context", delta, reason)
+	if rule.EntropyMin > 0 {
+		switch {
+		case entropy >= rule.EntropyMin+1.5:
+			builder.Add("entropy", 5, fmt.Sprintf("%.2f bits/symbol, well above the %.1f floor", entropy, rule.EntropyMin))
+		case entropy < rule.EntropyMin+0.5:
+			builder.Add("entropy", -8, fmt.Sprintf("%.2f bits/symbol, close to the %.1f floor", entropy, rule.EntropyMin))
+		}
 	}
 	if rule.Validate != nil {
 		if signal, ok := rule.Validate(full, payload); ok {
 			builder.Add(signal.Name, signal.Delta, signal.Reason)
 		}
 	}
+
 	return builder.Build()
 }
 
@@ -344,35 +300,6 @@ func matchAnchor(rule *Rule, loc []int) int {
 		return loc[0]
 	}
 	return loc[2*rule.Group]
-}
-
-func (s *Scanner) scanFile(path string) (FileResult, string) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return FileResult{Stats: Stats{FilesSkipped: 1}}, fmt.Sprintf("%s: %v", path, err)
-	}
-	if info.Size() > s.opts.MaxFileSize {
-		return FileResult{Stats: Stats{FilesSkipped: 1}}, ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return FileResult{Stats: Stats{FilesSkipped: 1}}, fmt.Sprintf("%s: %v", path, err)
-	}
-	return s.ScanText(path, data), ""
-}
-
-func (s *Scanner) skipDir(name string) bool {
-	for _, ignored := range s.opts.IgnoreDirs {
-		if strings.EqualFold(ignored, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Scanner) skipExt(path string) bool {
-	_, found := binaryExts[strings.ToLower(filepath.Ext(path))]
-	return found
 }
 
 // isBinary reports whether content looks binary. Only the first 8 KiB are
@@ -411,12 +338,12 @@ func sortFindings(findings []finding.Finding) {
 		if a.Confidence.Value != b.Confidence.Value {
 			return a.Confidence.Value > b.Confidence.Value
 		}
-		if a.File != b.File {
-			return a.File < b.File
+		if a.URL != b.URL {
+			return a.URL < b.URL
 		}
-		if a.Line != b.Line {
-			return a.Line < b.Line
+		if a.RuleID != b.RuleID {
+			return a.RuleID < b.RuleID
 		}
-		return a.RuleID < b.RuleID
+		return a.Value < b.Value
 	})
 }

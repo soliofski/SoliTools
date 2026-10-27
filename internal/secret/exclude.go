@@ -1,7 +1,6 @@
 package secret
 
 import (
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -10,9 +9,9 @@ import (
 // fixtures or templates.
 //
 // Matching is case-insensitive and runs against the payload only — that is,
-// after the vendor prefix has been stripped — so a prefix can never mask a
-// real token, and "example" inside a bare value is enough to reject it. This
-// is the filter that removes canonical documentation leaks such as
+// after the vendor prefix has been stripped — so a provider name can never mask
+// a real token, while "example" inside a bare value is enough to reject it.
+// This is the filter that removes canonical documentation leaks such as
 // AKIAIOSFODNN7EXAMPLE.
 var placeholderMarkers = []string{
 	"example",
@@ -31,19 +30,23 @@ var placeholderMarkers = []string{
 	"notreal",
 	"foobar",
 	"lorem",
-	"todo",
-	"fixme",
+	"TODO",
+	"FIXME",
 	"***",
 	"<",
 	">",
+	"test",
+	"fake",
+	"demo",
+	"localhost",
 }
 
 // placeholderReason reports which marker made a payload look like a template.
 func placeholderReason(payload string) (string, bool) {
 	lower := strings.ToLower(payload)
 	for _, marker := range placeholderMarkers {
-		if strings.Contains(lower, marker) {
-			return "placeholder marker " + strconv.Quote(marker), true
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return "placeholder marker " + strconv.Quote(strings.ToLower(marker)), true
 		}
 	}
 	return "", false
@@ -83,39 +86,4 @@ func isDegenerate(payload string) bool {
 		run = 1
 	}
 	return false
-}
-
-// pathPenalty lowers confidence for files that are expected to contain fake
-// credentials. It never suppresses: a fixture can still hold a real key copied
-// in by mistake, it just ranks lower.
-func pathPenalty(path string) (float64, string) {
-	if path == "" {
-		return 0, ""
-	}
-	slashed := filepath.ToSlash(strings.ToLower(path))
-	// Normalize so both "examples/x" and "C:/repo/examples/x" match the same
-	// slash-delimited markers below.
-	if !strings.HasPrefix(slashed, "/") {
-		slashed = "/" + slashed
-	}
-	switch {
-	case strings.Contains(slashed, "testdata"),
-		strings.Contains(slashed, "fixtures"),
-		strings.Contains(slashed, "__tests__"),
-		strings.Contains(slashed, "/test/"),
-		strings.HasSuffix(slashed, "_test.go"),
-		strings.HasSuffix(slashed, "_test.py"),
-		strings.HasSuffix(slashed, ".test.js"),
-		strings.HasSuffix(slashed, ".spec.js"):
-		return -20, "path looks like a test fixture"
-	case strings.Contains(slashed, "/examples/"),
-		strings.Contains(slashed, "/samples/"),
-		strings.Contains(slashed, "/docs/"),
-		strings.HasSuffix(slashed, ".md"),
-		strings.HasSuffix(slashed, ".rst"),
-		strings.HasSuffix(slashed, ".txt"),
-		strings.Contains(slashed, "readme"):
-		return -10, "path looks like documentation or sample data"
-	}
-	return 0, ""
 }

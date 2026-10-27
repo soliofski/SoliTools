@@ -1,169 +1,220 @@
 # SoliTools
 
-High-accuracy web security analysis in Go. The design rule for this project is
-simple: **a finding must be worth a human's time**. Precision is preferred over
-recall at every decision point, and anything that is filtered out is counted
-and explained rather than silently dropped.
+High-accuracy web security scanner in Go, built for penetration testing and bug
+bounty work. The guiding rule: **a finding must be worth a human's time**.
+Precision beats recall at every decision point, and everything filtered out is
+counted and explained rather than silently dropped.
 
-Current state: the confidence model and the secret module are implemented and
-tested. The `js` and `reflect` modules are not written yet — see
-[Roadmap](#roadmap).
+> Use SoliTools only against systems you are authorized to test. It sends real
+> HTTP requests, including harmless canary payloads.
+
+## Build
+
+Go 1.21 or newer, no external dependencies (stdlib only, builds offline):
+
+```console
+go build -o solitools ./cmd/solitools
+go test ./...
+```
 
 ## Usage
 
-```
-solitools scan [flags] <path>...
-
-  -min-confidence float   drop findings below this score (0 uses default 40)
-  -generic                add the low-precision generic rules
-  -json                   emit a JSON report
+```console
+solitools scan [flags] <url>
 ```
 
 ```console
-$ solitools scan .
-internal/app/config.go:14:18  secret.github-token  confidence 70.0 (high)
-    GitHub token
-    match ghp_********************************3N  fp 5ce1bae32a8f7923
-    score 90.0 -> 70.0  path-context -20.0 (path looks like a test fixture)
+$ solitools scan https://target.example/
+[SECRET] [95] GitHub Token
+URL: https://target.example/static/app.js
+Value: ghp_********************************Ge3N
+Context: ...const token = "ghp_********************************Ge3N"; fetch("/api/v1...
+Line: 1:120
+Entropy: 5.06 bits/symbol
+Occurrences: 2
 
-Scanned 19 files (66.4 KiB) in 29ms
-Findings: 1 (1 high or very-high)
-Suppressed: 2 (placeholder 2)
+[REFLECT] [90] Potential Reflected XSS
+URL: https://target.example/search?q=hello
+Value: soli<x3z>yq
+Context: ...<p>soli<x3z>yq</p>...
+Parameter: q
+Reflection Point: HTML body
+Payload: soli<x3z>yq
+Status: 200
+
+Target: https://target.example/
+Requests: 41  Pages: 1  Scripts: 3  Endpoints: 12  Parameters: 4
+Findings: 2 (1 critical, 1 high)
+Filtered at detection: 6 (placeholder 4, superseded 2)
 ```
 
-Exit codes: `0` no findings, `1` findings reported, `2` usage or runtime error.
+Exit codes: `0` nothing at the selected threshold, `1` findings reported, `2`
+usage or runtime error.
 
-The binary writes nothing but the report: no network calls, no file
-modification, no telemetry.
+### Flags
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-strict` | off | only show findings with confidence ≥ 75 |
+| `-all` | off | show everything, including low confidence |
+| `-min-score` | unset | explicit threshold; overrides `-strict`/`-all` |
+| `-mask` | **true** | mask secret values (pass `-mask=false` to reveal) |
+| `-rate` | 10 | maximum requests per second, shared by all modules |
+| `-proxy` | none | HTTP/HTTPS/SOCKS5 proxy URL |
+| `-header` | none | extra request header, `"Name: value"`, repeatable |
+| `-cookie` | none | raw Cookie header value |
+| `-timeout` | 15s | per-request timeout |
+| `-max-params` | 10 | parameters actively probed |
+| `-skip-path` | off | skip the sensitive-path wordlist |
+| `-verbose` | off | print the score derivation |
+| `-json` | off | machine-readable report |
+
+Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
 
 ## Confidence model
 
-Every finding starts at the base confidence its rule declares and is adjusted by
-named signals. The full trace is attached to the finding, so any score can be
-reconstructed and argued with after the fact. There is no opaque model and no
-randomness; the same bytes always produce the same score.
+Every finding starts at the base confidence its detector declares and is
+adjusted by named signals. The full trace is attached to each finding, so any
+score can be reconstructed and argued with after the fact.
 
-| Band        | Range      | Meaning                                        |
-| ----------- | ---------- | ---------------------------------------------- |
-| `low`       | `[0, 40)`  | usually noise, hidden by default               |
-| `medium`    | `[40, 70)` | worth a human look                             |
-| `high`      | `[70, 90)` | likely a real finding                          |
-| `very-high` | `[90, 100]`| provider-identified and structurally valid     |
+| Band | Range | Meaning |
+| --- | --- | --- |
+| `critical` | 90–100 | vendor-identified, structurally valid, or verified by the protocol |
+| `high` | 75–89 | likely real; `-strict` starts here |
+| `medium-high` | 60–74 | **default display threshold** |
+| `medium` | 40–59 | only with `-all` |
+| `low` | < 40 | likely noise |
 
-Two mechanisms are deliberately kept apart:
+Two mechanisms are kept strictly apart:
 
 - **Gates** reject a candidate outright — a malformed value is not a weak
   finding, it is not a finding. Gates never produce a score.
-- **Signals** adjust confidence and are always visible in `confidence.signals`.
+- **Signals** adjust confidence and always appear in the trace.
 
-Current signals: `generic-rule` (−10), `path-context` (−20 for test fixtures,
-−10 for docs and samples), plus any advisory validator a rule attaches.
+Everything suppressed is counted per reason and printed in the summary, so a
+filter can be audited instead of trusted.
 
-`-min-confidence` defaults to 40, the bottom of the medium band. Lowering it to
-`1` reports everything; suppressed findings are always counted per reason in the
-summary so the filter can be audited.
+## Modules
 
-## Secret module
+### secret — credential detection
 
-### What makes it precise
+Rules must encode provider identity: a reserved prefix (`ghp_`, `sk_live_`,
+`AIza`, …) or an unambiguous structure. Nothing in the high-scoring set is
+"keyword plus entropy", which is the dominant source of false positives.
 
-1. **Provider identity is required.** Every default rule has a reserved prefix
-   (`ghp_`, `sk_live_`, `AIza`, …) or an unambiguous structure (a PEM block that
-   base64-decodes to real DER). Nothing in the default set is "keyword plus
-   entropy", which is the dominant source of false positives in secret scanning.
-2. **Gates, not penalties, for malformed values.** Length bounds, entropy
-   floors, placeholder detection and structural requirements reject a candidate
-   before it can be scored.
-3. **Entropy is measured on the payload, not the prefix.** `sk_live_` is
-   stripped before the entropy check, so a low-entropy literal cannot make a
-   real token look random, and a low-entropy prefix cannot mask an empty one.
-4. **The canonical documentation keys are rejected by name.** `…EXAMPLE`
-   payloads never reach the report.
-5. **Padding is rejected structurally.** A payload with three or fewer distinct
-   characters, or a run of eight identical characters, is not a credential.
-6. **Context lowers rank instead of hiding evidence.** A match under
-   `testdata/`, `fixtures/` or `*_test.go` drops 20 points but is still
-   reported: fixtures can contain real keys copied in by mistake.
+| Category | Rule | Base | Hard requirements |
+| --- | --- | --- | --- |
+| Private Key | `secret.private-key` | 95 | PEM body must base64-decode to ≥ 64 bytes of DER |
+| AWS | `secret.aws-access-key-id` | 85 | prefix + 16 chars, entropy ≥ 3.0 |
+| GitHub | `secret.github-token` | 90 | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 36, entropy ≥ 3.5 |
+| GitHub | `secret.github-fine-grained-pat` | 90 | `github_pat_` structure, entropy ≥ 3.5 |
+| Slack | `secret.slack-token` | 85 | `xox[baprs]-`, entropy ≥ 2.0 |
+| Google | `secret.google-api-key` | 80 | `AIza` + 35, entropy ≥ 3.0 |
+| Stripe | `secret.stripe-live-key` | 90 | `sk_live_`/`rk_live_`, entropy ≥ 3.0 |
+| Stripe | `secret.stripe-test-key` | 30 | below the default threshold by design |
+| Anthropic | `secret.anthropic-api-key` | 90 | `sk-ant-api03-`, entropy ≥ 3.5 |
+| OpenAI | `secret.openai-api-key` | 85 | `sk-proj-`/`sk-svcacct-`, entropy ≥ 3.5 |
+| GitLab | `secret.gitlab-pat` | 85 | `glpat-` + 20, entropy ≥ 3.0 |
+| npm | `secret.npm-token` | 85 | `npm_` + 36, entropy ≥ 3.5 |
+| SendGrid | `secret.sendgrid-api-key` | 85 | `SG.` structure, entropy ≥ 3.5 |
+| Twilio | `secret.twilio-api-key` | 70 | `SK` + 32 hex, entropy ≥ 2.5 |
+| Azure | `secret.azure-storage-key` | 85 | `AccountKey=` + 86–90 base64, entropy ≥ 4.0 |
+| JWT | `secret.jwt` | 55 | header segment must decode to JSON with `alg` (+10) |
+| Generic Secret | `secret.generic-assignment` | 50 | keyword assignment, entropy ≥ 3.2, −10 generic |
+| Generic Secret | `secret.generic-high-entropy` | 40 | 40–64 char random string, −10 generic |
 
-### Reporting safety
+Accuracy work behind the table:
 
-`match` is always redacted: the first four characters identify the provider, the
-last two distinguish similar findings, and the middle is masked (capped at 32
-stars). PEM blocks keep their header only. `fingerprint` is the first 16 hex
-characters of SHA-256 over the whitespace-stripped payload, so the same secret
-can be correlated across files without ever being printed. Reports are safe to
-paste into tickets and CI logs.
+- **Entropy is graded, not just gated.** Payloads far above their floor gain 5
+  points; payloads within 0.5 bits of it lose 8. Entropy is measured on the
+  payload *after* the vendor prefix is stripped, so `sk_live_` cannot depress it.
+- **Placeholders are rejected by name**: `example`, `test`, `dummy`, `sample`,
+  `fake`, `demo`, `localhost`, `changeme`, `<...>`, and the canonical
+  `AKIA…EXAMPLE` key.
+- **Comments are filtered**, but conservatively: `https://` is never a comment,
+  string literals are skipped, and a miss keeps a finding rather than hiding a
+  real credential.
+- **One credential, one finding.** A generic match that overlaps a
+  provider-specific match is dropped (`superseded`), so the same key is never
+  reported twice under different rules.
+- **Block formats are shielded.** Base64 key material can never resurface as a
+  "high-entropy string", even if the PEM block itself fails validation.
+- **Secrets are masked by default**, including inside `Context` — masking only
+  the value line would leak the credential anyway.
 
-### Rules
+### js — script triage and endpoint extraction
 
-| Rule | Base | Structure |
-| --- | --- | --- |
-| `secret.private-key` | 95 | PEM block; body must base64-decode to ≥64 bytes of DER |
-| `secret.aws-access-key-id` | 85 | `AKIA`/`ASIA`/… + 16 chars, entropy ≥ 3.0 |
-| `secret.github-token` | 90 | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 36, entropy ≥ 3.5 |
-| `secret.github-fine-grained-pat` | 90 | `github_pat_` + 22 + `_` + 59, entropy ≥ 3.5 |
-| `secret.slack-token` | 85 | `xoxb-`/`xoxp-`/… , entropy ≥ 2.0 (digits-heavy tokens) |
-| `secret.google-api-key` | 80 | `AIza` + 35, entropy ≥ 3.0 |
-| `secret.stripe-live-key` | 90 | `sk_live_`/`rk_live_` + 24…247, entropy ≥ 3.0 |
-| `secret.stripe-test-key` | 30 | `sk_test_`/`rk_test_`; below the default threshold by design |
-| `secret.anthropic-api-key` | 90 | `sk-ant-api03-`…, entropy ≥ 3.5 |
-| `secret.openai-api-key` | 85 | `sk-proj-`/`sk-svcacct-`/`sk-admin-`…, entropy ≥ 3.5 |
-| `secret.gitlab-pat` | 85 | `glpat-` + 20, entropy ≥ 3.0 |
-| `secret.npm-token` | 85 | `npm_` + 36, entropy ≥ 3.5 |
-| `secret.sendgrid-api-key` | 85 | `SG.` + 22 + `.` + 43, entropy ≥ 3.5 |
-| `secret.twilio-api-key` | 70 | `SK` + 32 hex, entropy ≥ 2.5 |
-| `secret.azure-storage-key` | 85 | `AccountKey=` + 86…90 base64, entropy ≥ 4.0 |
+Scripts on the same registrable domain are fetched; analytics, tag managers and
+public CDNs are skipped (they never contain target endpoints). Endpoints are
+extracted from quoted literals and absolute URLs, then filtered: asset
+extensions, template placeholders (`${…}`, `{{…}}`, `%s`), third-party hosts and
+empty paths are dropped, and the rest is normalized and deduplicated.
 
-Opt-in via `-generic`:
+### param — parameter classification
 
-| Rule | Base | Structure |
-| --- | --- | --- |
-| `secret.generic-assignment` | 55 | `password`/`api_key`/… `=` `"value"`, entropy ≥ 3.2 |
-| `secret.generic-high-entropy` | 45 | bare 40…64 char random string, entropy ≥ 4.2 |
+Curated lists, not heuristics: `high` covers redirect/file/template sinks,
+`medium` covers identifiers and content, `noise` covers `utm_*`, `fbclid`,
+`gclid` and friends, which are never probed.
 
-Entropy is Shannon entropy in bits per symbol.
+### reflect — reflection analysis
 
-Stripe test keys sit at base 30 on purpose: they cannot move money, and treating
-them as incidents trains people to ignore the report. They are still visible at
-`-min-confidence 30`.
+Three inert canaries of different length and character class:
+
+```
+solix1z9q      soli"x2z'q      soli<x3z>yq
+```
+
+They break quotes and tags but contain no event handler, so a probe can never
+execute code on the target. A finding requires **two reflected canaries, or the
+tag-breaking one intact** — a lone alphanumeric echo is usually an error page
+repeating the query, which is exactly the false positive this module avoids.
+
+Scoring: +15 unencoded, +20 in HTML body/attribute, +12 in JavaScript, **−25 in
+a comment**, +10 for consistency across canaries, −10 on a 4xx/5xx response,
+−15 when the body reads like a generic error page.
+
+### redirect — open redirects
+
+Only redirect-specific parameters are tested, with three payload styles
+(`https://`, `//`, `/\`). A finding requires an actual `Location` header
+pointing at the canary host — an echoed value is not a redirect, and a relative
+redirect is normal application behaviour, not a vulnerability.
+
+### path — sensitive paths
+
+A short, high-value wordlist (`.env`, `.git/config`, `.aws/credentials`,
+`id_rsa`, backups, `actuator`, `swagger-ui.html`, …). Only `200`, `401` and
+`403` are considered. Soft 404s are filtered against a random baseline with a
+size comparison sized relative to the page, default server pages are discarded,
+and 200 responses score higher than 403s.
+
+## Infrastructure
+
+- **Polite by default**: a single global token bucket at 10 req/s shared by all
+  goroutines, so no module can flood a target.
+- **Bounded concurrency**: `internal/errgroup` (a local, dependency-free subset
+  of `golang.org/x/sync/errgroup`), 4–8 workers per stage.
+- **Classified failures**: DNS, TLS, timeout, connection and invalid-URL errors
+  are distinguishable; one dead path never aborts a scan.
+- **No redirect following** except for the initial page fetch, so a detection
+  never turns into a request to a third party.
+- **Request accounting**: the report states how many requests the run actually
+  made.
 
 ## Known limitations
 
-These are accepted trade-offs, not oversights:
+- No live validation of credentials (no provider API calls); scores are
+  structural.
+- Reflection detection is single-request, not time-based: stored XSS is out of
+  scope.
+- Path scanning uses a fixed wordlist capped at 20 entries by default.
+- Only `GET` requests are used; form and JSON bodies are not probed.
+- Third-party detection uses a small public-suffix table, not the full PSL.
+- Low-entropy real tokens are rejected by design; precision beats recall.
 
-- **Unusual low-entropy tokens are rejected.** A real credential with few
-  distinct symbols will not be reported. Precision beats recall here.
-- **No live validation.** The tool never contacts a provider to confirm a key.
-  That keeps runs offline and deterministic.
-- **No JWT, basic-auth URL or JSON-escaped PEM rule yet.** Private keys embedded
-  as `\n`-escaped strings are missed; that is the next secret-module gap.
-- **Working tree only.** Git history and commit messages are not scanned.
-- **Binary detection is a NUL scan of the first 8 KiB** plus an extension list.
-- **Symlinked files are skipped** during a directory walk.
-- **Default ignore list.** `.git`, `node_modules`, `vendor`, `.venv` and similar
-  directories are skipped unless `IgnoreDirs` is set explicitly.
+## Next steps
 
-## Roadmap
-
-Ordered by the project's priority list:
-
-1. ~~Confidence Score system~~ — done.
-2. ~~Secret module~~ — done; next gap is JSON-escaped PEM and JWT structure.
-3. **`js` module** — extract endpoints and embedded credentials from bundles,
-   with source-map awareness and per-bundle deduplication.
-4. **`reflect` module** — analyze request/response pairs for input reflection,
-   with context classification to keep output encoding advice accurate.
-5. **Correlation** — fingerprint-based grouping across files and runs.
-
-## Development
-
-```
-go test ./...
-go vet ./...
-gofmt -l .
-```
-
-Rules and their gates live in `internal/secret/rules.go`; the scoring model is
-`internal/confidence`. Adding a rule requires a positive test and at least one
-false-positive regression in `internal/secret/scanner_test.go` — the false
-positives are the specification, not an afterthought.
+1. Stored/blind reflection variants and POST parameter support.
+2. Parameter mining from more sources (HTML forms, source maps).
+3. Provider-specific live validation behind an explicit flag.
+4. Report formats for CI (SARIF).
