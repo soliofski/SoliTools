@@ -1,7 +1,7 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.10.0` · **Branch:** `main` · **Commits:** 15
+**Version:** `0.10.0` · **Branch:** `main` · **Commits:** 16
 **Size:** 67 Go files (42 source, 25 test), ~11,150 lines including tests, 190 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
@@ -905,6 +905,7 @@ reports evidence; it does not weaponise it.
 | `483c8fa` | fix(redirect): detect every backslash payload style | five payloads; backslashes folded before parsing |
 | `2b7e85b` | feat(reflect): detect stored reflection with an opt-in second pass | `-stored`, `Submit`/`Analyze`, observation re-fetch |
 | `a2b25f2` | feat: add depth-one crawl and custom wordlists | `internal/crawl`, `-crawl`/`-max-pages`, `-wordlist` with a 200-entry cap |
+| `babdd21` | feat(tui): add an interactive terminal UI | `internal/tui`, `solitools tui`, live monitor, explorer, JSON/SARIF save |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
