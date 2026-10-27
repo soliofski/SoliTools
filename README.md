@@ -24,6 +24,7 @@ go test ./...
 
 ```console
 solitools scan [flags] <url>
+solitools tui
 ```
 
 Two opt-in modes worth knowing up front:
@@ -89,6 +90,29 @@ usage or runtime error.
 | `-color` | `auto` | `auto`, `always` or `never`; `auto` colors only on a terminal |
 
 Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
+
+### Interactive TUI
+
+`solitools tui` — or a bare `solitools` on a terminal — opens a full-screen
+interface over the same engine:
+
+1. **Configure.** Target URL with an editable cursor, checkboxes for crawl,
+   forms, stored detection, skip-path and masking, a confidence radio group
+   (default ≥ 60, strict ≥ 75, all ≥ 0), and numeric rate/page limits.
+   `↑/↓` moves, space toggles, `←/→` adjusts, Enter starts, `Esc`/`q` exits.
+2. **Monitor.** A spinner shows the active stage, with elapsed time, request
+   count, measured rate and findings per confidence band. `Esc`/`Ctrl+C`
+   cancels the scan and keeps what was found so far.
+3. **Explore.** A scrollable list (`↑/↓`, `j`/`k`, `PgUp`/`PgDn`) with severity
+   and module badges; the detail panel shows URL, parameter, rule, category,
+   value, context and the full score derivation. `m` toggles masking for the
+   selected finding, `s` saves a JSON or SARIF report (secrets stay masked on
+   disk), `q` exits.
+
+The TUI draws on the alternate screen buffer, so the user's scrollback survives,
+and hides the cursor while it owns the terminal. It requires a real terminal on
+both stdin and stdout; with a pipe it refuses to start, leaving the plain usage
+text and exit code 2 intact. There is no mouse support.
 
 ### Code scanning (SARIF)
 

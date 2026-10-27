@@ -79,6 +79,10 @@ type Options struct {
 	// Progress is called at each pipeline stage with a short human label. It is
 	// always invoked from the goroutine that called Run, never concurrently.
 	Progress func(stage string)
+	// Notify is called for every finding as it is produced, before dedupe. The
+	// TUI uses it for live counters; it may be called concurrently and must be
+	// cheap and safe for concurrent use.
+	Notify func(finding.Finding)
 }
 
 // reportProgress publishes a stage label if a listener is attached.
@@ -171,7 +175,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	result.Stats.Pages = len(fetched)
 
-	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission)}
+	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission), notify: options.Notify}
 	// The page body already contains every inline script, so scanning it once
 	// covers them; scanning them separately would double-count the same secret.
 	for _, current := range fetched {
@@ -452,6 +456,7 @@ type collector struct {
 	// stored maps a page to the submissions whose values could have been
 	// persisted there; the stored pass re-fetches each page once.
 	stored   map[string][]reflect.Submission
+	notify   func(finding.Finding)
 	gated    int
 	byReason map[string]int
 }
@@ -475,12 +480,24 @@ func (c *collector) addSecret(result secret.Result) {
 	for reason, count := range result.ByReason {
 		c.byReason[reason] += count
 	}
+	for _, candidate := range result.Findings {
+		c.notifyFinding(candidate)
+	}
 }
 
 func (c *collector) addFinding(candidate finding.Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.findings = append(c.findings, candidate)
+	c.notifyFinding(candidate)
+}
+
+// notifyFinding runs the optional observer. The caller already holds the lock,
+// so the callback must not touch the collector.
+func (c *collector) notifyFinding(candidate finding.Finding) {
+	if c.notify != nil {
+		c.notify(candidate)
+	}
 }
 
 func (c *collector) addSubmission(page string, submission reflect.Submission) {

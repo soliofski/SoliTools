@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.9.0` · **Branch:** `main` · **Commits:** 14
-**Size:** 52 Go files (31 source, 21 test), ~8,900 lines including tests, 162 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.10.0` · **Branch:** `main` · **Commits:** 15
+**Size:** 67 Go files (42 source, 25 test), ~11,150 lines including tests, 190 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -92,6 +92,10 @@ detection, or gates: some failures only appear for certain random keys.
 - The tree must stay clean; `.gitignore` already excludes `solitools.exe`.
 
 ### 2.4 CLI reference
+
+Commands: `scan`, `tui`, `version`. A bare `solitools` opens the TUI when both
+stdin and stdout are real terminals; otherwise it prints usage and exits `2`, so
+scripts and CI never get a half-interactive session.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -189,6 +193,7 @@ internal/reflect   reflected-input canaries
 internal/redirect  open redirect verification
 internal/pathscan  sensitive path probing
 internal/report    text / JSON / quiet rendering, masking
+internal/tui       interactive form, live monitor, findings explorer
 internal/term      palette, TTY detection, width detection
 internal/progress  one-line live status during a scan
 ```
@@ -200,6 +205,7 @@ flowchart LR
     REPORT["internal/report<br/>text, JSON, quiet"]
     TERM["internal/term<br/>palette, TTY, width"]
     PROG["internal/progress<br/>live status line"]
+    TUI["internal/tui<br/>form, monitor, explorer"]
 
     SECRET["internal/secret"]
     JS["internal/js"]
@@ -219,6 +225,9 @@ flowchart LR
     CLI --> REPORT
     CLI --> TERM
     CLI --> PROG
+    CLI --> TUI
+    TUI --> SCAN
+    TUI --> REPORT
     SCAN --> SECRET
     SCAN --> JS
     SCAN --> FORM
@@ -260,7 +269,7 @@ flowchart LR
 ├── .gitignore                 /solitools, /solitools.exe, editor noise
 ├── cmd/solitools/
 │   ├── main.go                flags, banner, wiring, exit codes
-│   └── main_test.go           21 CLI tests against httptest servers
+│   └── main_test.go           23 CLI tests against httptest servers
 └── internal/
     ├── confidence/            scoring model
     ├── crawl/                 depth-one same-origin link discovery
@@ -277,12 +286,17 @@ flowchart LR
     ├── report/                text, JSON, quiet, masking
     ├── scan/                  orchestrator + dedupe
     ├── secret/                rules, scanner, comments, context, entropy
-    └── term/                  palette, TTY, width (windows + unix build tags)
+    ├── term/                  palette, TTY, width/height (windows + unix)
+    └── tui/                   form, live monitor, findings explorer
 ```
 
-`internal/term` is the only package with build-tagged files:
-`term_windows.go` / `width_windows.go` for the console API,
-`width_unix.go` for `TIOCGWINSZ`, `width_other.go` for everything else.
+`internal/term` and `internal/tui` carry the build-tagged files. In `term`,
+`term_windows.go` / `width_windows.go` use the console API,
+`width_unix.go` uses `TIOCGWINSZ`, and `width_other.go` reports nothing. In
+`tui`, `input_windows.go` / `raw_windows.go` use `ReadConsoleInputW` and console
+modes, `input_unix.go` / `raw_linux.go` / `raw_darwin.go` use termios, and
+`input_other.go` / `raw_other.go` keep the package compiling everywhere while
+returning a clear error at runtime.
 
 > There is a stray `solitools` (Linux ELF) in the repo root from a
 > `GOOS=linux go build ./...` verification. It is gitignored and safe to delete;
@@ -671,6 +685,44 @@ only to the built-in list. Only `200`, `401`,
 relative to the page (with a 200-byte scale floor). Default server pages are
 discarded. `200` outranks `403`.
 
+### 8.8 `tui` — interactive front end
+
+`tui.Run(ctx, Config{In, Out, Version, Theme})` owns the terminal for the
+duration of the session. It refuses to start unless both handles are real
+consoles, switches to the alternate screen buffer (`\x1b[?1049h`) with the
+cursor hidden (`\x1b[?25l`), and always restores both on exit. Normal quit,
+`Esc`, `q` and a scan that finishes all leave the user's scrollback untouched.
+
+Three screens, one state machine:
+
+| Screen | State | Input |
+|--------|-------|-------|
+| Configure | `Form`: target text + cursor, five checkboxes, threshold radio, rate and page numbers | arrows, space, left/right, digits, enter, esc |
+| Monitor | stage, elapsed, requests, measured rate, per-band finding counts | esc / ctrl+c cancels the scan context |
+| Explorer | `ResultView`: threshold-filtered list, cursor, scroll offset, mask overrides | arrows, j/k, pgup/pgdn, home/end, m, s, q |
+
+The form and the explorer are pure structs with pure methods, which is why the
+tests can cover bounds, toggles, scrolling and masking without a console.
+
+Input is platform-specific behind one `keyReader` interface:
+
+- **Windows** reads `KEY_EVENT_RECORD`s with `ReadConsoleInputW`, maps virtual
+  keys (`VK_UP`…, `VK_RETURN`, `VK_ESCAPE`) plus the Unicode character, and
+  enables `ENABLE_VIRTUAL_TERMINAL_INPUT` and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+  while disabling line input, echo and processed input so `Ctrl+C` arrives as a
+  key instead of a signal.
+- **Unix** switches termios to non-canonical, no-echo, `ISIG` off and decodes VT
+  sequences (`ESC[A`…, `ESC[5~`, `ESC[H`). A lone `ESC` waits five milliseconds
+  for the rest of a sequence before it is treated as the Esc key.
+- **Other platforms** compile and refuse at runtime.
+
+The renderer writes full frames (`ESC[H`, `ESC[2J`) and truncates by visible
+columns, skipping ANSI sequences, so a colour reset is never cut in half. Live
+counts come from `scan.Options.Notify` (called per finding, before dedupe) and
+`Client.Requests()`; rate is the delta between 100 ms samples. Saving calls
+`report.Render` with `JSON` or `SARIF`, so the file is byte-identical to the CLI
+and secrets stay masked on disk regardless of what the screen is revealing.
+
 ---
 
 ## 9. Rendering
@@ -711,17 +763,17 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-162 test functions. The distribution matters more than the number:
+190 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
-| `secret` (21) | every rule positive, plus explicit false-positive regressions |
-| `report` (16) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
-| `term` (11) | mode precedence, palette mapping, width parsing |
-| `cmd` (21) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist errors |
+| `secret` (22) | every rule positive, plus explicit false-positive regressions |
+| `report` (17) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
+| `term` (11) | mode precedence, palette mapping, width/height parsing |
+| `cmd` (23) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist and TUI errors |
 | `form` (10) | action resolution, field classes, destructive detection |
 | `crawl` (6) | same-origin and port rules, asset/logout exclusions, normalisation, cap |
-| `httpx` (7) | POST body, redirect policy, header injection, error classes |
+| `httpx` (8) | POST body, redirect policy, header injection, error classes |
 | `js` (6) | script resolution, third-party, endpoint filtering |
 | `param` (4) | classification, noise removal |
 | `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
@@ -730,6 +782,7 @@ Rules that must survive future edits:
 | `scan` (13) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist |
 | `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
+| `tui` (24) | key decoding (VT and VK), form bounds and toggles, list scrolling, masking, frame rendering |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
@@ -759,6 +812,8 @@ hosts.
 | A catch-all host yields no path findings | `TestProbeSkipsCatchAllHosts` |
 | Scores are deterministic and clamped | `internal/confidence` tests |
 | Piped text output has no escapes and no wrapping | `TestPlainReportHasNoEscapes`, `TestNoWrappingWithoutWidth` |
+| A masked TUI frame never contains the raw secret | `TestRenderResultsShowsListAndDetail` |
+| The TUI refuses a non-terminal instead of writing escapes into a pipe | `TestTUIRefusesWithoutTerminal` |
 | Exit codes: 0 clean, 1 findings, 2 error | `cmd` tests |
 
 ---
@@ -803,6 +858,7 @@ hosts.
 | done | ~~More secret rules~~ | Shipped in 0.7.0: JSON-escaped PEM, Discord webhooks, Telegram bot tokens, Azure SAS. |
 | done | ~~Stored / blind reflection~~ | Shipped in 0.8.0 as `-stored`: `Submit` keeps the evidence, a second pass re-fetches known pages, and only canaries absent from the immediate response qualify. Same-origin, capped at five pages, no out-of-band listener. |
 | done | ~~Multi-page crawl~~ | Shipped in 0.9.0 as `-crawl` + `-max-pages`: depth one, exact origin, assets and destructive paths excluded, crawled pages feeding secrets, forms, parameters and stored observation. |
+| done | ~~Interactive TUI~~ | Shipped in 0.10.0: `solitools tui` (or a bare invocation on a terminal), configuration form, live monitor with cancellation, findings explorer with mask toggle and JSON/SARIF save. |
 | 1 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
 | 2 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
 
@@ -821,8 +877,11 @@ reports evidence; it does not weaponise it.
   (the `js` module extracts endpoints, it does not execute or symbolically
   evaluate JavaScript).
 - Path scanning uses a fixed 26-entry list, or a custom file capped at 200
-  entries. Crawling is depth one, opt-in, and capped at 10 pages including the
-  seed.
+  entries.
+- The TUI needs a real terminal on stdin and stdout. It has no mouse support,
+  and its interactive layer is not covered by automated tests — the state
+  models, decoders and rendered frames are, but a real console is still the
+  only way to exercise raw mode end to end.
 - Third-party detection uses a small suffix table, so exotic TLDs (`co.zw`,
   `com.ar`) may be misclassified.
 - JWTs are reported on structure alone; many are legitimately public.

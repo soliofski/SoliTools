@@ -22,9 +22,10 @@ import (
 	"solitools/internal/report"
 	"solitools/internal/scan"
 	"solitools/internal/term"
+	"solitools/internal/tui"
 )
 
-const version = "0.9.0"
+const version = "0.10.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -32,12 +33,19 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
+		// A bare invocation is interactive only when both ends are a console;
+		// piped or CI use must keep the scriptable usage/exit-2 behaviour.
+		if term.IsTerminal(stdout) && term.IsTerminal(os.Stdin) {
+			return runTUI(stdout, stderr)
+		}
 		usage(stderr)
 		return 2
 	}
 	switch args[0] {
 	case "scan":
 		return runScan(args[1:], stdout, stderr)
+	case "tui":
+		return runTUI(stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "solitools %s\n", version)
 		return 0
@@ -56,6 +64,7 @@ func usage(w io.Writer) {
 
 Usage:
   solitools scan [flags] <url>
+  solitools tui
   solitools version
 
 Flags for scan:
@@ -91,6 +100,28 @@ Exit codes:
 
 Only scan systems you are authorized to test.
 `)
+}
+
+// runTUI starts the interactive front end. It refuses to run without a real
+// terminal on both ends: raw mode is a device property, and a half-interactive
+// session writing ANSI into a pipe would corrupt the caller's output.
+func runTUI(stdout, stderr io.Writer) int {
+	out, ok := stdout.(*os.File)
+	if !ok || !term.IsTerminal(out) || !term.IsTerminal(os.Stdin) {
+		fmt.Fprintln(stderr, "solitools tui: an interactive terminal is required")
+		return 2
+	}
+	theme := term.New(out, term.ModeAuto)
+	if err := tui.Run(context.Background(), tui.Config{
+		In:      os.Stdin,
+		Out:     out,
+		Version: version,
+		Theme:   theme,
+	}); err != nil {
+		fmt.Fprintf(stderr, "solitools tui: %v\n", err)
+		return 2
+	}
+	return 0
 }
 
 // headerList collects repeatable -header flags.

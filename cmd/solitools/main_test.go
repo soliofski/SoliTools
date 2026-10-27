@@ -30,6 +30,29 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+func TestTUIRefusesWithoutTerminal(t *testing.T) {
+	code, _, stderr := runCLI(t, "tui")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 without a terminal", code)
+	}
+	if !strings.Contains(stderr, "interactive terminal") {
+		t.Fatalf("stderr = %q, want an explanatory error", stderr)
+	}
+}
+
+func TestBareInvocationWithoutTerminalPrintsUsage(t *testing.T) {
+	code, _, stderr := runCLI(t)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "Usage:") {
+		t.Fatalf("stderr = %q, want usage text", stderr)
+	}
+	if !strings.Contains(stderr, "solitools tui") {
+		t.Fatalf("stderr = %q, want the tui command documented", stderr)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	cases := [][]string{
 		{},

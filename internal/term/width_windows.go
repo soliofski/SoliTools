@@ -44,3 +44,20 @@ func consoleWidth(f *os.File) int {
 	}
 	return columns
 }
+
+// consoleHeight asks the Windows console for its visible window height.
+func consoleHeight(f *os.File) int {
+	var info consoleScreenBufferInfo
+	result, _, _ := procGetConsoleScreenBufferInfo.Call(
+		uintptr(syscall.Handle(f.Fd())),
+		uintptr(unsafe.Pointer(&info)),
+	)
+	if result == 0 {
+		return 0
+	}
+	rows := int(info.window.bottom-info.window.top) + 1
+	if rows < 0 {
+		return 0
+	}
+	return rows
+}

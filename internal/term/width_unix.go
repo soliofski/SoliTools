@@ -21,6 +21,23 @@ type winsize struct {
 // The ioctl request number differs between Linux and the BSD family; an
 // unsupported platform simply reports 0 and the caller falls back.
 func consoleWidth(f *os.File) int {
+	size := winsizeFor(f)
+	if size == nil {
+		return 0
+	}
+	return int(size.columns)
+}
+
+// consoleHeight reads the same TIOCGWINSZ answer for the row count.
+func consoleHeight(f *os.File) int {
+	size := winsizeFor(f)
+	if size == nil {
+		return 0
+	}
+	return int(size.rows)
+}
+
+func winsizeFor(f *os.File) *winsize {
 	size := &winsize{}
 	request := uintptr(0x5413) // Linux TIOCGWINSZ
 	if runtime.GOOS != "linux" {
@@ -28,7 +45,7 @@ func consoleWidth(f *os.File) int {
 	}
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), request, uintptr(unsafe.Pointer(size)))
 	if errno != 0 {
-		return 0
+		return nil
 	}
-	return int(size.columns)
+	return size
 }
