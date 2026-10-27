@@ -162,6 +162,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 | 10 | Animation corrupts redirected output | `-color=always \| file` would write `\r` and clear-line codes | Animation requires a real TTY (`term.IsTerminal`), independent of colour mode |
 | 11 | URLs get hard-wrapped | A split URL cannot be copied into a browser | `URL` rows are exempt from wrapping |
 | 12 | Soft-404 filter too loose | A 512-byte absolute tolerance treats any tiny page as the catch-all | `similarSize` is relative with a 200-byte scale floor |
+| 13 | RE2 rejects nested counted repetition | `(?:a{1,2}b){0,10}` compiles, but `(?:[a-z]{2,4}=[^&]{0,200}&){0,10}` fails with `invalid repeat count` | Flatten to one character class with a single bounded repeat, as `secret.azure-sas-token` does |
 
 ---
 
