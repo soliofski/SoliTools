@@ -68,8 +68,31 @@ usage or runtime error.
 | `-skip-path` | off | skip the sensitive-path wordlist |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
+| `-color` | `auto` | `auto`, `always` or `never`; `auto` colors only on a terminal |
 
 Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
+
+### Terminal experience
+
+Output is styled for a real terminal and plain everywhere else:
+
+- module badges are colored per kind — `SECRET` magenta, `REFLECT` cyan,
+  `REDIRECT` yellow, `PATH` blue;
+- the score badge follows its band, from grey (`low`) to bright red (`critical`);
+- secret values are highlighted in amber, URLs in near-white, labels in grey;
+- while a scan runs, a single line shows a spinner, the current stage and a live
+  request counter;
+- the run ends with a boxed summary of findings, bands, traffic and everything
+  that was filtered.
+
+Color appears only when stdout is an interactive terminal. `NO_COLOR`,
+`CLICOLOR=0` and `TERM=dumb` turn it off, `-color=always` forces it (including
+into a pipe) and `-color=never` removes it entirely. JSON output is never
+styled, and the animated status line requires a real terminal so redirected
+output never collects carriage returns.
+
+On Windows the console is switched into VT mode first; if that fails the tool
+falls back to plain text rather than printing raw escape codes.
 
 ## Confidence model
 

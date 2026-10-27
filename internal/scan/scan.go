@@ -46,6 +46,16 @@ type Options struct {
 	MaxPathWords int
 	// SkipPath disables the path module.
 	SkipPath bool
+	// Progress is called at each pipeline stage with a short human label. It is
+	// always invoked from the goroutine that called Run, never concurrently.
+	Progress func(stage string)
+}
+
+// reportProgress publishes a stage label if a listener is attached.
+func (o Options) reportProgress(stage string) {
+	if o.Progress != nil {
+		o.Progress(stage)
+	}
 }
 
 func (o Options) normalized() Options {
@@ -100,6 +110,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	result := Result{Target: target.String(), Stats: Stats{ByReason: make(map[string]int)}}
+	options.reportProgress("crawling target")
 	page, err := options.Client.Fetch(ctx, target.String())
 	if err != nil {
 		return result, err
@@ -125,6 +136,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	result.Stats.Scripts = len(firstParty)
 
+	options.reportProgress("analysing scripts")
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(4)
 	for _, scriptURL := range firstParty {
@@ -169,6 +181,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	reflectAnalyzer := reflect.New(options.Client)
 	redirectAnalyzer := redirect.New(options.Client)
+	options.reportProgress("probing parameters")
 
 	probeGroup, probeCtx := errgroup.WithContext(ctx)
 	probeGroup.SetLimit(4)
@@ -191,6 +204,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	_ = probeGroup.Wait()
 
 	if !options.SkipPath {
+		options.reportProgress("scanning sensitive paths")
 		words := pathscan.Wordlist()
 		if len(words) > options.MaxPathWords {
 			words = words[:options.MaxPathWords]

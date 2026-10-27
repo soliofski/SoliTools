@@ -145,6 +145,41 @@ func TestScanCleanServerExitsZero(t *testing.T) {
 	}
 }
 
+func TestColorAlwaysEmitsEscapes(t *testing.T) {
+	server := leakingServer(t)
+	code, stdout, _ := runCLI(t, "scan", "-color", "always", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stdout, "\x1b[") {
+		t.Fatal("-color=always produced no ANSI styling")
+	}
+	if !strings.Contains(stdout, "┌") {
+		t.Fatal("summary box was not drawn")
+	}
+}
+
+func TestJSONIsNeverStyled(t *testing.T) {
+	server := leakingServer(t)
+	code, stdout, _ := runCLI(t, "scan", "-json", "-color", "always", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if strings.Contains(stdout, "\x1b[") {
+		t.Fatal("JSON output contains ANSI escapes")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+}
+
+func TestColorModeRejectsGarbage(t *testing.T) {
+	if code, _, _ := runCLI(t, "scan", "-color", "rainbow", "https://example.com"); code != 2 {
+		t.Fatalf("exit = %d, want 2 for an invalid color mode", code)
+	}
+}
+
 func TestScanStrictHidesMediumHigh(t *testing.T) {
 	// A JWT scores 65: visible by default, hidden under -strict.
 	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0" + ".abcdefghijklmnopqrstuvwx"

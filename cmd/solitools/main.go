@@ -17,11 +17,13 @@ import (
 
 	"solitools/internal/confidence"
 	"solitools/internal/httpx"
+	"solitools/internal/progress"
 	"solitools/internal/report"
 	"solitools/internal/scan"
+	"solitools/internal/term"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -70,6 +72,8 @@ Flags for scan:
   -skip-path              skip the sensitive-path wordlist
   -verbose                show the score derivation
   -json                   emit a JSON report
+  -color auto|always|never
+                          color output (default auto: only on a terminal)
 
 Exit codes:
   0  no findings at the selected threshold
@@ -106,6 +110,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
 	asJSON := flags.Bool("json", false, "emit a JSON report")
+	colorMode := flags.String("color", "auto", "color output: auto, always or never")
 
 	var headers headerList
 	flags.Var(&headers, "header", "extra request header, \"Name: value\" (repeatable)")
@@ -119,6 +124,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	target := normalizeTarget(targets[0])
+
+	shade, err := term.ParseMode(*colorMode)
+	if err != nil {
+		fmt.Fprintf(stderr, "solitools scan: %v\n", err)
+		return 2
+	}
+	theme := term.New(stdout, shade)
 
 	threshold, err := resolveThreshold(flags, *minScore, *strict, *all)
 	if err != nil {
@@ -138,13 +150,24 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// JSON output must stay parseable: no banner and no live status block.
+	if !*asJSON {
+		writeBanner(stdout, theme, target, threshold, *rate)
+	}
+	live := progress.New(stdout, theme, client)
+	if !*asJSON {
+		live.Start()
+	}
+
 	start := time.Now()
 	result, err := scan.Run(context.Background(), scan.Options{
 		Target:    target,
 		Client:    client,
 		MaxParams: *maxParams,
 		SkipPath:  *skipPath,
+		Progress:  live.Stage,
 	})
+	live.Stop()
 	if err != nil {
 		fmt.Fprintf(stderr, "solitools scan: %v\n", err)
 		return 2
@@ -157,6 +180,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		JSON:      *asJSON,
 		Elapsed:   time.Since(start),
 		Version:   version,
+		Theme:     theme,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "solitools: %v\n", err)
@@ -166,6 +190,20 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// writeBanner prints the product header before a scan starts.
+func writeBanner(w io.Writer, theme *term.Theme, target string, threshold, rate float64) {
+	fmt.Fprintf(w, "%s %s\n", theme.Accent("SoliTools"), theme.Dim(version))
+	fmt.Fprintf(w, "  %s %s\n", theme.Dim("target  "), theme.Color("url", target))
+	fmt.Fprintf(w, "  %s %s\n\n", theme.Dim("settings"), describeThreshold(threshold, rate))
+}
+
+func describeThreshold(threshold, rate float64) string {
+	if threshold <= 0 {
+		return fmt.Sprintf("showing all findings · %.0f req/s", rate)
+	}
+	return fmt.Sprintf("confidence >= %.0f (%s) · %.0f req/s", threshold, confidence.BandOf(threshold), rate)
 }
 
 // resolveThreshold picks the display threshold. An explicit -min-score always
