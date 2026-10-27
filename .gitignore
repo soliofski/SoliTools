@@ -1,0 +1,17 @@
+# Build output
+/solitools
+/solitools.exe
+/bin/
+/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor and OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
