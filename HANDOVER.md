@@ -1,9 +1,11 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.4.0` · **HEAD:** `d5dd2ac` · **Branch:** `main` · **Commits:** 4
-**Size:** 43 Go files, ~5,750 lines, 97 test functions, 18 secret rules, zero external dependencies.
+**Version:** `0.5.0` · **Branch:** `main` · **Commits:** 6
+**Size:** 46 Go files, ~6,800 lines, 120 test functions, 18 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
+
+Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
 
 This document is written so you can pick up cold: what exists, why it is built
 this way, what will bite you, and what to do next. Read §3 (the traps) before
@@ -173,6 +175,7 @@ internal/finding   shared result type; no printing
 internal/confidence scoring model: base + signals, clamp, band
 internal/secret    credential detection
 internal/js        script triage + endpoint extraction
+internal/form      HTML form parsing, safety classification
 internal/param     parameter classification
 internal/reflect   reflected-input canaries
 internal/redirect  open redirect verification
@@ -192,6 +195,7 @@ flowchart LR
 
     SECRET["internal/secret"]
     JS["internal/js"]
+    FORM["internal/form"]
     PARAM["internal/param"]
     REFLECT["internal/reflect"]
     REDIRECT["internal/redirect"]
@@ -208,6 +212,7 @@ flowchart LR
     CLI --> PROG
     SCAN --> SECRET
     SCAN --> JS
+    SCAN --> FORM
     SCAN --> PARAM
     SCAN --> REFLECT
     SCAN --> REDIRECT
@@ -250,6 +255,7 @@ flowchart LR
     ├── confidence/            scoring model
     ├── errgroup/              local x/sync subset
     ├── finding/               shared Finding type
+    ├── form/                  form parsing, safety classification
     ├── httpx/                 the only I/O
     ├── js/                    script triage, endpoint extraction
     ├── param/                 parameter classification
@@ -537,7 +543,37 @@ path — normalising it would make every internal redirect look external — and
 UNC-style `\\server\share` path must still fail to parse as a host. Both cases
 are pinned in `TestLeavesSite`.
 
-### 8.6 `pathscan` — small, high-value wordlist
+### 8.7 `form` — parameters hidden in markup
+
+Entry point: `form.Parse(html, base) []Form`, then `Form.Values()` and
+`Form.ProbeFields()`.
+
+A URL-only scanner never sees a form field. The parser extracts `<form>` blocks
+with a regex, resolves the action against the page URL (dropping `mailto:` and
+`javascript:` actions), and collects `input`, `select` and `textarea` names.
+Unclosed forms are skipped: guessing where a form ends risks attributing another
+form's fields to it.
+
+Three classes of field exist:
+
+| Class | Behaviour |
+|-------|-----------|
+| probeable | replaced by a canary during probing |
+| CSRF / nonce / framework state (`_token`, `csrfmiddlewaretoken`, `__VIEWSTATE`, `_method`, `state`, anything with a `__` prefix) | submitted with its original value, never replaced |
+| submit, button, reset, image | dropped entirely — they carry no parameter |
+
+How forms enter the pipeline (`scan.collector.addForms`):
+
+- **GET forms** are folded into the query path: action plus default values is
+  just a URL, so they reuse the existing GET probe machinery and change nothing.
+- **POST forms** require `-forms`, an action on the same host, no file input
+  (a multipart body cannot be reconstructed from markup) and a non-destructive
+  shape (`LooksDestructive` looks for `delete`, `checkout`, `payment`,
+  `transfer`, … in the action path or a field name). `MaxForms` defaults to 3.
+
+`httpx.PostForm` is the only state-changing call in the codebase. Every other
+request is a GET. If you extend the tool, keep that property: a POST must always
+be traceable to an explicit user decision.
 
 26 entries (`.env`, `.git/config`, `.aws/credentials`, `id_rsa`, backups,
 `actuator`, `swagger-ui.html`, …), capped at 20 per run. Only `200`, `401`,
@@ -581,20 +617,22 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-97 test functions. The distribution matters more than the number:
+120 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
-| `secret` (21) | every rule positive, plus explicit false-positive regressions |
+| `secret` (20) | every rule positive, plus explicit false-positive regressions |
 | `report` (11) | masking in context, JSON purity, wrapping limits, quiet |
 | `term` (11) | mode precedence, palette mapping, width parsing |
-| `cmd` (13) | exit codes, flags, JSON schema, quiet, colour |
+| `cmd` (14) | exit codes, flags, JSON schema, quiet, colour, form opt-in |
+| `form` (10) | action resolution, field classes, destructive detection |
+| `httpx` (7) | POST body, redirect policy, header injection, error classes |
 | `js` (6) | script resolution, third-party, endpoint filtering |
 | `param` (4) | classification, noise removal |
-| `reflect` (4) | context classification, escaped reflection rejected, error page down-ranked |
-| `redirect` (5) | external verified, internal ignored, echo ignored |
+| `reflect` (5) | context classification, POST bodies, escaped reflection rejected |
+| `redirect` (7) | external verified, internal ignored, echo ignored, backslash forms |
 | `pathscan` (3) | status filter, soft-404, catch-all host |
-| `scan` (3) | full pipeline against `httptest` |
+| `scan` (6) | full pipeline, form opt-in, cross-origin rejection |
 | `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 
@@ -662,12 +700,12 @@ hosts.
 
 | Priority | Work | Why it is the next thing |
 |----------|------|--------------------------|
-| 1 | **POST and form parameters** | `reflect` and `redirect` only reach query strings today. `js` already surfaces endpoints worth form-probing. This is the largest real coverage gap. Needs: request bodies in `httpx.Request`, form discovery in the HTML, and a decision on which parameters are worth a POST. |
-| 2 | **SARIF output** (`-sarif`) | `-quiet` made the tool CI-friendly; SARIF makes it Code-Scanning-friendly. Cheap, high leverage, no accuracy risk. |
-| 3 | **More secret rules** | JSON-escaped PEM (`"-----BEGIN…\n…"`), plus providers people actually leak (Azure SAS, Discord webhooks, Telegram bot tokens). Follow the recipe in §12. |
-| 4 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
-| 5 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
-| 6 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| done | ~~POST and form parameters~~ | Shipped in 0.5.0 as `-forms`: forms parsed, GET forms folded into the URL path, POST probing opt-in with same-origin and destructive filters. |
+| 1 | **SARIF output** (`-sarif`) | `-quiet` made the tool CI-friendly; SARIF makes it Code-Scanning-friendly. Cheap, high leverage, no accuracy risk. |
+| 2 | **More secret rules** | JSON-escaped PEM (`"-----BEGIN…\n…"`), plus providers people actually leak (Azure SAS, Discord webhooks, Telegram bot tokens). Follow the recipe in §12. |
+| 3 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
+| 4 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
+| 5 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.
@@ -709,9 +747,11 @@ threshold inside the scanner.
 1. **`-mask` defaults to on.** The product brief listed it as an opt-in flag but
    also showed masked output. The current default protects logs; confirm the
    user still prefers that.
-2. **POST design.** Which parameters deserve a body (form action targets only?
-   every high-interest name?), how to handle CSRF tokens, and whether to reuse
-   the GET probe logic or write a separate stage.
+2. **POST design.** Decided in 0.5.0: `-forms` is opt-in, actions must be
+   same-origin, file inputs and destructive-looking forms are skipped, and every
+   other field keeps its default value so CSRF tokens survive. If this is ever
+   enabled by default, re-open the decision — a form submission can create
+   records or send mail.
 3. **Live validation.** Any provider check means contacting a third party with a
    user's credential. That is a product decision, not an implementation detail.
 4. **Crawl depth.** Multi-page scanning multiplies requests; decide whether it

@@ -9,13 +9,16 @@ package scan
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"solitools/internal/errgroup"
 	"solitools/internal/finding"
+	"solitools/internal/form"
 	"solitools/internal/httpx"
 	"solitools/internal/js"
 	"solitools/internal/param"
@@ -30,6 +33,8 @@ const (
 	DefaultMaxParams    = 10
 	DefaultMaxScripts   = 10
 	DefaultMaxPathWords = 20
+	// DefaultMaxForms caps POST form probing, which is opt-in.
+	DefaultMaxForms = 3
 )
 
 // Options configures a scan.
@@ -46,6 +51,11 @@ type Options struct {
 	MaxPathWords int
 	// SkipPath disables the path module.
 	SkipPath bool
+	// EnableForms submits POST forms. Off by default: a form submission can
+	// change state, so it is opt-in and restricted to same-origin forms.
+	EnableForms bool
+	// MaxForms caps how many POST forms are probed.
+	MaxForms int
 	// Progress is called at each pipeline stage with a short human label. It is
 	// always invoked from the goroutine that called Run, never concurrently.
 	Progress func(stage string)
@@ -68,6 +78,9 @@ func (o Options) normalized() Options {
 	if o.MaxPathWords <= 0 {
 		o.MaxPathWords = DefaultMaxPathWords
 	}
+	if o.MaxForms <= 0 {
+		o.MaxForms = DefaultMaxForms
+	}
 	return o
 }
 
@@ -79,6 +92,7 @@ type Stats struct {
 	ThirdPartyScripts int            `json:"third_party_scripts"`
 	Endpoints         int            `json:"endpoints"`
 	Parameters        int            `json:"parameters"`
+	Forms             int            `json:"forms"`
 	Gated             int            `json:"gated"`
 	ByReason          map[string]int `json:"gated_by_reason,omitempty"`
 }
@@ -162,6 +176,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	collected.addEndpoints(js.ExtractEndpoints(page.Body, base))
 	collected.addParams(target)
 	collected.addParams(base)
+	result.Stats.Forms = collected.addForms(page.Body, base, options.EnableForms, options.MaxForms)
 
 	endpoints, params := collected.snapshot()
 	result.Stats.Endpoints = len(endpoints)
@@ -188,12 +203,18 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	for _, probe := range probes {
 		probe := probe
 		probeGroup.Go(func() error {
-			candidate, ok := reflectAnalyzer.Probe(probeCtx, reflect.Target{URL: probe.URL, Name: probe.Name, Interest: probe.Interest})
+			candidate, ok := reflectAnalyzer.Probe(probeCtx, reflect.Target{
+				URL: probe.URL, Name: probe.Name, Interest: probe.Interest,
+				Method: probe.Method, Fields: probe.Fields,
+			})
 			if ok {
 				collected.addFinding(candidate)
 			}
 			if redirect.IsRedirectParam(probe.Name) {
-				redirected, ok := redirectAnalyzer.Probe(probeCtx, redirect.Target{URL: probe.URL, Name: probe.Name, Interest: probe.Interest})
+				redirected, ok := redirectAnalyzer.Probe(probeCtx, redirect.Target{
+					URL: probe.URL, Name: probe.Name, Interest: probe.Interest,
+					Method: probe.Method, Fields: probe.Fields,
+				})
 				if ok {
 					collected.addFinding(redirected)
 				}
@@ -258,6 +279,10 @@ type probeTarget struct {
 	URL      string
 	Name     string
 	Interest param.Interest
+	// Method is "" or "GET" for a query parameter, "POST" for a form field.
+	Method string
+	// Fields carries form defaults for a POST target.
+	Fields url.Values
 }
 
 func (c *collector) addSecret(result secret.Result) {
@@ -314,7 +339,7 @@ func (c *collector) snapshot() ([]string, []probeTarget) {
 	seenParams := make(map[string]struct{}, len(c.params))
 	params := make([]probeTarget, 0, len(c.params))
 	for _, target := range c.params {
-		key := target.URL + "|" + target.Name
+		key := target.Method + "|" + target.URL + "|" + target.Name
 		if _, duplicate := seenParams[key]; duplicate {
 			continue
 		}
@@ -323,6 +348,74 @@ func (c *collector) snapshot() ([]string, []probeTarget) {
 	}
 
 	return endpoints, params
+}
+
+// addForms registers parameters that only exist inside HTML forms.
+//
+// A GET form is just a URL, so it joins the query-parameter path with no
+// submission and no side effects. A POST form becomes a probe target only when
+// the caller opted in, the action stays on the same origin, and the form does
+// not look destructive.
+func (c *collector) addForms(document []byte, base *url.URL, allowPost bool, limit int) int {
+	pending := make([]probeTarget, 0, 8)
+	posts := 0
+
+	for _, candidate := range form.Parse(document, base) {
+		if candidate.HasFile || !sameOrigin(candidate.Action, base) {
+			continue
+		}
+
+		if candidate.Method == http.MethodPost {
+			if !allowPost || candidate.LooksDestructive() || posts >= limit {
+				continue
+			}
+			posts++
+			values := candidate.Values()
+			for _, field := range candidate.ProbeFields() {
+				pending = append(pending, probeTarget{
+					URL:      candidate.Action,
+					Name:     field.Name,
+					Interest: param.Classify(field.Name),
+					Method:   http.MethodPost,
+					Fields:   values,
+				})
+			}
+			continue
+		}
+
+		parsed, err := url.Parse(candidate.Action)
+		if err != nil {
+			continue
+		}
+		query := parsed.Query()
+		for _, field := range candidate.ProbeFields() {
+			if _, exists := query[field.Name]; !exists {
+				query.Set(field.Name, field.Value)
+			}
+		}
+		parsed.RawQuery = query.Encode()
+		c.addParams(parsed)
+	}
+
+	if len(pending) > 0 {
+		c.mu.Lock()
+		c.params = append(c.params, pending...)
+		c.mu.Unlock()
+	}
+	return posts
+}
+
+// sameOrigin reports whether the action stays on the target host. A POST to a
+// third party would be an attack on someone else's system, so it never happens.
+func sameOrigin(action string, base *url.URL) bool {
+	if base == nil {
+		return false
+	}
+	parsed, err := url.Parse(action)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, base.Host)
 }
 
 // dedupe collapses repeated evidence and records how often it was seen.

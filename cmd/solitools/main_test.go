@@ -216,6 +216,41 @@ func TestNegativeWidthIsRejected(t *testing.T) {
 	}
 }
 
+func TestFormsProbingIsOptIn(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><form action="/feedback" method="post">`+
+			`<input name="message"></form></body></html>`)
+	})
+	mux.HandleFunc("/feedback", func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		fmt.Fprintf(w, "<html><body><p>%s</p></body></html>", r.PostFormValue("message"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	code, stdout, _ := runCLI(t, "scan", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 without -forms:\n%s", code, stdout)
+	}
+
+	code, stdout, _ = runCLI(t, "scan", "-forms", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 with -forms:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "[REFLECT]") {
+		t.Fatalf("no reflection reported for the POST form:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Method:") {
+		t.Fatalf("the finding does not identify the method:\n%s", stdout)
+	}
+}
+
 func TestScanStrictHidesMediumHigh(t *testing.T) {
 	// A JWT scores 65: visible by default, hidden under -strict.
 	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0" + ".abcdefghijklmnopqrstuvwx"

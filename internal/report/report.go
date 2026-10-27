@@ -193,12 +193,7 @@ func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts
 	rows := [][2]string{
 		{"Findings", fmt.Sprintf("%d", len(shown))},
 		{"Bands", plainBands(shown)},
-		{"Traffic", fmt.Sprintf("%s · %s · %s · %s · %s",
-			plural(result.Stats.Requests, "request", "requests"),
-			plural(result.Stats.Pages, "page", "pages"),
-			plural(result.Stats.Scripts, "script", "scripts"),
-			plural(result.Stats.Endpoints, "endpoint", "endpoints"),
-			plural(result.Stats.Parameters, "param", "params"))},
+		{"Traffic", trafficSummary(result.Stats)},
 	}
 	if hidden > 0 {
 		rows = append(rows, [2]string{"Hidden", fmt.Sprintf("%d below threshold (use --all)", hidden)})
@@ -217,9 +212,13 @@ func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts
 }
 
 func writePlainSummary(w io.Writer, result scan.Result, shown []finding.Finding, hidden int, width int) {
-	lines := []string{fmt.Sprintf("Requests: %d  Pages: %d  Scripts: %d  Endpoints: %d  Parameters: %d",
+	requests := fmt.Sprintf("Requests: %d  Pages: %d  Scripts: %d  Endpoints: %d  Parameters: %d",
 		result.Stats.Requests, result.Stats.Pages, result.Stats.Scripts,
-		result.Stats.Endpoints, result.Stats.Parameters)}
+		result.Stats.Endpoints, result.Stats.Parameters)
+	if result.Stats.Forms > 0 {
+		requests += fmt.Sprintf("  Forms: %d", result.Stats.Forms)
+	}
+	lines := []string{requests}
 
 	summary := fmt.Sprintf("Findings: %d", len(shown))
 	if bands := plainBands(shown); bands != "" {
@@ -367,6 +366,21 @@ func splitToken(runes []rune, width int) ([]rune, []rune) {
 		}
 	}
 	return runes[:width], runes[width:]
+}
+
+// trafficSummary renders the counters shared by the box and the summary.
+func trafficSummary(stats scan.Stats) string {
+	parts := []string{
+		plural(stats.Requests, "request", "requests"),
+		plural(stats.Pages, "page", "pages"),
+		plural(stats.Scripts, "script", "scripts"),
+		plural(stats.Endpoints, "endpoint", "endpoints"),
+		plural(stats.Parameters, "param", "params"),
+	}
+	if stats.Forms > 0 {
+		parts = append(parts, plural(stats.Forms, "form", "forms"))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // truncate shortens s to limit runes, keeping the result readable.

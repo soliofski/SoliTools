@@ -235,6 +235,22 @@ func (c *Client) Fetch(ctx context.Context, target string) (*Response, error) {
 	return nil, &Error{URL: target, Kind: ErrConnection, Err: errors.New("too many redirects")}
 }
 
+// PostForm submits an application/x-www-form-urlencoded body.
+//
+// This is the only state-changing request the tool can issue. The scan
+// pipeline reaches it exclusively through the opt-in form mode, and only for
+// same-origin forms that do not look destructive.
+func (c *Client) PostForm(ctx context.Context, target string, values url.Values) (*Response, error) {
+	headers := make(http.Header, 1)
+	headers.Set("Content-Type", "application/x-www-form-urlencoded")
+	return c.Do(ctx, Request{
+		URL:     target,
+		Method:  http.MethodPost,
+		Headers: headers,
+		Body:    strings.NewReader(values.Encode()),
+	})
+}
+
 // Do performs one request.
 func (c *Client) Do(ctx context.Context, request Request) (*Response, error) {
 	parsed, err := url.Parse(request.URL)

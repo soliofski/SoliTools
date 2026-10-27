@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -98,6 +99,44 @@ func TestProbeIgnoresReflectionWithoutRedirect(t *testing.T) {
 	analyzer := New(newTestClient(t))
 	if _, ok := analyzer.Probe(context.Background(), Target{URL: server.URL + "/?next=x", Name: "next"}); ok {
 		t.Fatal("an echoed value is not a redirect")
+	}
+}
+
+func TestProbeDetectsPostRedirect(t *testing.T) {
+	var gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		if r.Method != http.MethodPost {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		r.ParseForm()
+		target := r.PostFormValue("next")
+		if strings.HasPrefix(target, "https://example.com/solitools-redirect-check") ||
+			strings.HasPrefix(target, "//example.com/solitools-redirect-check") {
+			w.Header().Set("Location", target)
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	analyzer := New(newTestClient(t))
+	finding, ok := analyzer.Probe(context.Background(), Target{
+		URL:    server.URL + "/go",
+		Name:   "next",
+		Method: http.MethodPost,
+		Fields: url.Values{"csrf": {"t"}},
+	})
+	if !ok {
+		t.Fatal("expected an open redirect submitted through a form")
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("server saw %q, want POST", gotMethod)
+	}
+	if finding.Confidence.Value < 90 {
+		t.Fatalf("confidence = %v, want critical", finding.Confidence.Value)
 	}
 }
 

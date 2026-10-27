@@ -69,6 +69,7 @@ usage or runtime error.
 | `-timeout` | 15s | per-request timeout |
 | `-max-params` | 10 | parameters actively probed |
 | `-skip-path` | off | skip the sensitive-path wordlist |
+| `-forms` | off | submit POST forms (may change state; same-origin only) |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
 | `-quiet` | off | one-line summary only (CI mode); implies plain output |
@@ -196,6 +197,24 @@ Curated lists, not heuristics: `high` covers redirect/file/template sinks,
 `medium` covers identifiers and content, `noise` covers `utm_*`, `fbclid`,
 `gclid` and friends, which are never probed.
 
+### form — parameters that never appear in a URL
+
+A URL-only scanner sees nothing of a form. `internal/form` parses `<form>`
+markup for its action, method and named controls, resolving relative actions and
+dropping anything unusable (unclosed forms, `mailto:` actions, unknown verbs).
+
+- **GET forms** are folded into the query path: their action plus default values
+  is just a URL, so they cost one request and change nothing.
+- **POST forms** are only submitted with `-forms`, and only when the action is
+  on the target host. Forms with a file input are skipped (a body cannot be
+  reconstructed from markup), and forms that look destructive — `delete`,
+  `checkout`, `payment`, `transfer`, … in the action or a field name — are
+  skipped too. A submission can create records or send mail; opt-in is the only
+  honest default.
+- Every other field keeps its original value, so CSRF tokens and framework state
+  (`__VIEWSTATE`, `_token`, `csrfmiddlewaretoken`) are submitted untouched and
+  never replaced by a canary.
+
 ### reflect — reflection analysis
 
 Three inert canaries of different length and character class:
@@ -257,7 +276,7 @@ and 200 responses score higher than 403s.
 
 ## Next steps
 
-1. Stored/blind reflection variants and POST parameter support.
-2. Parameter mining from more sources (HTML forms, source maps).
+1. Stored/blind reflection variants: a single-shot probe cannot see them.
+2. Parameter mining from source maps and JSON responses.
 3. Provider-specific live validation behind an explicit flag.
-4. Report formats for CI (SARIF).
+4. SARIF output for CI.

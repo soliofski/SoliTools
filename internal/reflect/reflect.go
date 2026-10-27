@@ -10,6 +10,7 @@ package reflect
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -58,6 +59,11 @@ type Target struct {
 	Name string
 	// Interest is the classification used to prioritise probing.
 	Interest param.Interest
+	// Method is empty or "GET" for a query parameter, "POST" for a form field.
+	Method string
+	// Fields holds the form's default values; the probed field is replaced and
+	// every other field keeps its original value, CSRF tokens included.
+	Fields url.Values
 }
 
 // Analyzer sends reflection probes through a shared, rate-limited client.
@@ -114,11 +120,7 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 	point := ContextUnknown
 
 	for _, payload := range canaries {
-		probeURL, err := withParam(target.URL, target.Name, payload)
-		if err != nil {
-			continue
-		}
-		response, err := a.client.Get(ctx, probeURL)
+		response, err := a.send(ctx, target, payload)
 		if err != nil {
 			continue
 		}
@@ -175,6 +177,9 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 		Confidence: builder.Build(),
 	}
 	candidate.WithField("Parameter", target.Name)
+	if isFormPost(target.Method) {
+		candidate.WithField("Method", http.MethodPost)
+	}
 	candidate.WithField("Reflection Point", string(point))
 	candidate.WithField("Payload", payloadUsed)
 	candidate.WithField("Status", fmt.Sprintf("%d", status))
@@ -230,6 +235,36 @@ func snippet(body, payload string) string {
 
 func collapse(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// send issues one probe: a query parameter for a URL, or a form body field for
+// a POST form.
+func (a *Analyzer) send(ctx context.Context, target Target, payload string) (*httpx.Response, error) {
+	if isFormPost(target.Method) {
+		values := cloneValues(target.Fields)
+		values.Set(target.Name, payload)
+		return a.client.PostForm(ctx, target.URL, values)
+	}
+	probeURL, err := withParam(target.URL, target.Name, payload)
+	if err != nil {
+		return nil, err
+	}
+	return a.client.Get(ctx, probeURL)
+}
+
+// isFormPost reports whether the target is a form field rather than a query
+// parameter.
+func isFormPost(method string) bool {
+	return strings.EqualFold(method, http.MethodPost)
+}
+
+// cloneValues copies form defaults so one probe cannot leak into the next.
+func cloneValues(values url.Values) url.Values {
+	out := make(url.Values, len(values)+1)
+	for name, list := range values {
+		out[name] = append([]string(nil), list...)
+	}
+	return out
 }
 
 // withParam returns rawURL with the named query parameter replaced by value.

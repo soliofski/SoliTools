@@ -8,6 +8,7 @@ package redirect
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -61,6 +62,10 @@ type Target struct {
 	Name string
 	// Interest is carried through for reporting and prioritisation.
 	Interest param.Interest
+	// Method is empty or "GET" for a query parameter, "POST" for a form field.
+	Method string
+	// Fields holds the form's default values; the probed field is replaced.
+	Fields url.Values
 }
 
 // Analyzer probes redirect-capable parameters through a shared client.
@@ -79,11 +84,7 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 	}
 
 	for _, payload := range Payloads() {
-		probeURL, err := withParam(target.URL, target.Name, payload)
-		if err != nil {
-			continue
-		}
-		response, err := a.client.Get(ctx, probeURL)
+		response, probeURL, err := a.send(ctx, target, payload)
 		if err != nil {
 			continue
 		}
@@ -113,6 +114,9 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 			Confidence: builder.Build(),
 		}
 		candidate.WithField("Parameter", target.Name)
+		if strings.EqualFold(target.Method, http.MethodPost) {
+			candidate.WithField("Method", http.MethodPost)
+		}
 		candidate.WithField("Payload", payload)
 		candidate.WithField("Location", location)
 		candidate.WithField("Status", fmt.Sprintf("%d", response.Status))
@@ -160,6 +164,28 @@ func normalizeLocation(location string) string {
 		return "https://" + candidate[separators:]
 	}
 	return candidate
+}
+
+// send issues one probe and reports the URL that was actually requested: the
+// payload stays visible in a query string, while a POST is identified by its
+// action URL plus the payload field.
+func (a *Analyzer) send(ctx context.Context, target Target, payload string) (*httpx.Response, string, error) {
+	if strings.EqualFold(target.Method, http.MethodPost) {
+		values := make(url.Values, len(target.Fields)+1)
+		for name, list := range target.Fields {
+			values[name] = append([]string(nil), list...)
+		}
+		values.Set(target.Name, payload)
+		response, err := a.client.PostForm(ctx, target.URL, values)
+		return response, target.URL, err
+	}
+
+	probeURL, err := withParam(target.URL, target.Name, payload)
+	if err != nil {
+		return nil, "", err
+	}
+	response, err := a.client.Get(ctx, probeURL)
+	return response, probeURL, err
 }
 
 func withParam(rawURL, name, value string) (string, error) {

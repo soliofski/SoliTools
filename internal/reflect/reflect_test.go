@@ -6,9 +6,11 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"solitools/internal/finding"
 	"solitools/internal/httpx"
 	"solitools/internal/param"
 )
@@ -69,6 +71,54 @@ func TestProbeReportsUnescapedReflection(t *testing.T) {
 	if finding.Fields[1].Value != string(ContextHTMLText) {
 		t.Fatalf("fields = %+v, want HTML body context", finding.Fields)
 	}
+}
+
+func TestProbeUsesPostBody(t *testing.T) {
+	var gotCSRF, gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		// Untouched fields must survive: a dropped CSRF token makes the probe
+		// useless against any real application.
+		gotCSRF = r.PostFormValue("csrf")
+		fmt.Fprintf(w, "<html><body><div>%s</div></body></html>", r.PostFormValue("comment"))
+	}))
+	defer server.Close()
+
+	analyzer := New(newTestClient(t))
+	finding, ok := analyzer.Probe(context.Background(), Target{
+		URL:    server.URL + "/feedback",
+		Name:   "comment",
+		Method: http.MethodPost,
+		Fields: url.Values{"csrf": {"token-123"}},
+	})
+	if !ok {
+		t.Fatal("expected a reflection inside a POST form")
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("server saw %q, want POST", gotMethod)
+	}
+	if gotCSRF != "token-123" {
+		t.Fatalf("csrf field = %q, want the form default", gotCSRF)
+	}
+	if finding.Confidence.Value < 75 {
+		t.Fatalf("confidence = %v, want high", finding.Confidence.Value)
+	}
+	if !hasField(finding, "Method", http.MethodPost) {
+		t.Fatalf("fields = %+v, want a Method: POST line", finding.Fields)
+	}
+}
+
+// hasField reports whether the finding carries name=value.
+func hasField(f finding.Finding, name, value string) bool {
+	for _, field := range f.Fields {
+		if field.Name == name && field.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProbeRejectsEscapedReflection(t *testing.T) {

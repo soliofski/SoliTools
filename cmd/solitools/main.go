@@ -23,7 +23,7 @@ import (
 	"solitools/internal/term"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -70,6 +70,7 @@ Flags for scan:
   -timeout duration       per-request timeout (default 15s)
   -max-params int         maximum parameters to probe (default 10)
   -skip-path              skip the sensitive-path wordlist
+  -forms                  submit POST forms (may change state; same-origin only)
   -verbose                show the score derivation
   -quiet                  print only a one-line summary (CI mode)
   -width int              wrap output to this many columns (0 = detect)
@@ -110,6 +111,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	cookie := flags.String("cookie", "", "Cookie header value")
 	maxParams := flags.Int("max-params", scan.DefaultMaxParams, "maximum parameters to probe")
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
+	submitForms := flags.Bool("forms", false, "submit POST forms (may change state; same-origin only)")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
 	quiet := flags.Bool("quiet", false, "print only a one-line summary")
 	width := flags.Int("width", 0, "wrap output to this many columns (0 = detect)")
@@ -177,7 +179,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		Client:    client,
 		MaxParams: *maxParams,
 		SkipPath:  *skipPath,
-		Progress:  live.Stage,
+		// Opt-in: a form submission can create records or send mail.
+		EnableForms: *submitForms,
+		Progress:    live.Stage,
 	})
 	live.Stop()
 	if err != nil {
