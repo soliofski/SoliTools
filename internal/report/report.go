@@ -32,6 +32,8 @@ type Options struct {
 	Verbose bool
 	// JSON renders a machine-readable report instead of text.
 	JSON bool
+	// SARIF renders a SARIF 2.1.0 log for code-scanning integrations.
+	SARIF bool
 	// Elapsed is the wall time of the scan.
 	Elapsed time.Duration
 	// Version is stamped into JSON output.
@@ -73,6 +75,9 @@ func Render(w io.Writer, result scan.Result, opts Options) (int, error) {
 
 	if opts.JSON {
 		return len(shown), writeJSON(w, result, shown, opts)
+	}
+	if opts.SARIF {
+		return len(shown), writeSARIF(w, result, shown, opts)
 	}
 	if opts.Quiet {
 		writeQuiet(w, result, shown)

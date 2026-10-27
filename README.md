@@ -72,11 +72,31 @@ usage or runtime error.
 | `-forms` | off | submit POST forms (may change state; same-origin only) |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
+| `-sarif` | off | SARIF 2.1.0 log for code scanning (excludes `-json`) |
 | `-quiet` | off | one-line summary only (CI mode); implies plain output |
 | `-width` | 0 | wrap to this many columns; `0` detects the terminal |
 | `-color` | `auto` | `auto`, `always` or `never`; `auto` colors only on a terminal |
 
 Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
+
+### Code scanning (SARIF)
+
+`-sarif` emits a SARIF 2.1.0 log for GitHub code scanning and similar viewers.
+It and `-json` are mutually exclusive. Mapping decisions, so nobody has to
+reverse-engineer them:
+
+- `artifactLocation.uri` is the finding's URL. A `region.startLine` is added
+  only for secrets, where the response-body line is known; network findings
+  (path, redirect, reflection) carry no region.
+- `ruleId` is the stable rule id, with a `rules[]` catalogue carrying
+  `security-severity` (critical 9.0, high 7.5, medium-high 5.5, medium 3.5,
+  low 1.5) and tags.
+- `level`: critical/high → `error`, medium-high → `warning`, medium/low →
+  `note`.
+- Confidence, band, context, the field list and the signal trace survive in
+  `properties`; secrets also carry a `partialFingerprints` entry so a viewer can
+  track the same finding across runs.
+- Output is never styled and never wrapped.
 
 ### Terminal experience
 

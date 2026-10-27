@@ -198,6 +198,61 @@ func TestQuietPrintsASingleLine(t *testing.T) {
 	}
 }
 
+func TestJSONAndSARIFAreExclusive(t *testing.T) {
+	code, _, stderr := runCLI(t, "scan", "-json", "-sarif", "https://example.com")
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2", code)
+	}
+	if !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestSARIFOutput(t *testing.T) {
+	server := leakingServer(t)
+	code, stdout, stderr := runCLI(t, "scan", "-sarif", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1\nstderr:\n%s", code, stderr)
+	}
+
+	var payload struct {
+		Schema  string `json:"$schema"`
+		Version string `json:"version"`
+		Runs    []struct {
+			Tool struct {
+				Driver struct {
+					Name string `json:"name"`
+				} `json:"driver"`
+			} `json:"tool"`
+			Results []struct {
+				RuleID string `json:"ruleId"`
+				Level  string `json:"level"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout)
+	}
+	if payload.Schema == "" || payload.Version != "2.1.0" {
+		t.Fatalf("schema/version = %q/%q", payload.Schema, payload.Version)
+	}
+	if len(payload.Runs) != 1 || payload.Runs[0].Tool.Driver.Name != "SoliTools" {
+		t.Fatalf("tool driver = %+v", payload.Runs)
+	}
+	if len(payload.Runs[0].Results) != 1 {
+		t.Fatalf("results = %d, want 1", len(payload.Runs[0].Results))
+	}
+	if got := payload.Runs[0].Results[0]; got.RuleID != "secret.github-token" || got.Level != "error" {
+		t.Fatalf("result = %+v", got)
+	}
+	if strings.Contains(stdout, "\x1b[") {
+		t.Fatal("SARIF output contains ANSI escapes")
+	}
+	if strings.Contains(stdout, "Kf6Yc1Dh5Ju0Ge3N") {
+		t.Fatal("SARIF output leaks the secret")
+	}
+}
+
 func TestQuietKeepsJSONParseable(t *testing.T) {
 	server := leakingServer(t)
 	code, stdout, _ := runCLI(t, "scan", "-quiet", "-json", "-rate", "500", "-skip-path", server.URL+"/")

@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.5.0` · **Branch:** `main` · **Commits:** 6
-**Size:** 46 Go files, ~6,800 lines, 120 test functions, 18 secret rules, zero external dependencies.
+**Version:** `0.6.0` · **Branch:** `main` · **Commits:** 7
+**Size:** 46 Go files, ~6,800 lines, 128 test functions, 18 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -111,6 +111,7 @@ detection, or gates: some failures only appear for certain random keys.
 | `-width` | 0 | wrap to N columns; `0` detects the terminal |
 | `-color` | auto | `auto`, `always` or `never` |
 | `-json` | off | machine-readable report |
+| `-sarif` | off | SARIF 2.1.0 log; mutually exclusive with `-json` |
 
 Exit codes: `0` nothing at the selected threshold, `1` findings reported,
 `2` usage or runtime error. `-json` never contains ANSI, never wraps, and
@@ -592,7 +593,9 @@ flowchart TD
     R["Render"] --> F["filter by threshold"]
     F --> J{"JSON?"}
     J -->|"yes"| JSON["machine output<br/>no colour, no wrapping, no banner"]
-    J -->|"no"| Q{"quiet?"}
+    J -->|"no"| S{"SARIF?"}
+    S -->|"yes"| LOG["SARIF 2.1.0<br/>URL as artifact, line when known"]
+    S -->|"no"| Q{"quiet?"}
     Q -->|"yes"| ONE["one line<br/>findings, requests, bands, hidden"]
     Q -->|"no"| T{"theme enabled?"}
     T -->|"no"| PLAIN["plain text<br/>wrapped only if width is known"]
@@ -603,8 +606,10 @@ Rules that must survive future edits:
 
 1. **Masking happens before rendering**, and it rewrites `Context` as well as
    `Value`. Masked output must never contain the raw secret anywhere.
-2. **JSON is never styled and never wrapped.** `SetEscapeHTML(false)` is
-   deliberate: `&` must not become `\u0026` inside URLs.
+2. **JSON and SARIF are never styled and never wrapped.** `SetEscapeHTML(false)` is
+   deliberate: `&` must not become `\u0026` inside URLs. SARIF is file-oriented,
+   so a finding's URL becomes the artifact URI and only secrets carry a
+   `region.startLine`; never invent a line for network findings.
 3. **Colour needs evidence**: a real terminal, no `NO_COLOR`, no
    `CLICOLOR=0`, no `TERM=dumb`, and a successful VT-mode switch on Windows.
 4. **Animation needs a real TTY**, separately from colour.
@@ -617,12 +622,12 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-120 test functions. The distribution matters more than the number:
+128 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
 | `secret` (20) | every rule positive, plus explicit false-positive regressions |
-| `report` (11) | masking in context, JSON purity, wrapping limits, quiet |
+| `report` (16) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
 | `term` (11) | mode precedence, palette mapping, width parsing |
 | `cmd` (14) | exit codes, flags, JSON schema, quiet, colour, form opt-in |
 | `form` (10) | action resolution, field classes, destructive detection |
@@ -701,11 +706,11 @@ hosts.
 | Priority | Work | Why it is the next thing |
 |----------|------|--------------------------|
 | done | ~~POST and form parameters~~ | Shipped in 0.5.0 as `-forms`: forms parsed, GET forms folded into the URL path, POST probing opt-in with same-origin and destructive filters. |
-| 1 | **SARIF output** (`-sarif`) | `-quiet` made the tool CI-friendly; SARIF makes it Code-Scanning-friendly. Cheap, high leverage, no accuracy risk. |
-| 2 | **More secret rules** | JSON-escaped PEM (`"-----BEGIN…\n…"`), plus providers people actually leak (Azure SAS, Discord webhooks, Telegram bot tokens). Follow the recipe in §12. |
-| 3 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
-| 4 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
-| 5 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| done | ~~SARIF output~~ | Shipped in 0.6.0 as `-sarif`. |
+| 1 | **More secret rules** | JSON-escaped PEM (`"-----BEGIN…\n…"`), plus providers people actually leak (Azure SAS, Discord webhooks, Telegram bot tokens). Follow the recipe in §12. |
+| 2 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
+| 3 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
+| 4 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.

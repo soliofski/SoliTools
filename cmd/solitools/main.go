@@ -23,7 +23,7 @@ import (
 	"solitools/internal/term"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -75,6 +75,7 @@ Flags for scan:
   -quiet                  print only a one-line summary (CI mode)
   -width int              wrap output to this many columns (0 = detect)
   -json                   emit a JSON report
+  -sarif                  emit a SARIF 2.1.0 log (code scanning)
   -color auto|always|never
                           color output (default auto: only on a terminal)
 
@@ -116,6 +117,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	quiet := flags.Bool("quiet", false, "print only a one-line summary")
 	width := flags.Int("width", 0, "wrap output to this many columns (0 = detect)")
 	asJSON := flags.Bool("json", false, "emit a JSON report")
+	asSARIF := flags.Bool("sarif", false, "emit a SARIF 2.1.0 log")
 	colorMode := flags.String("color", "auto", "color output: auto, always or never")
 
 	var headers headerList
@@ -130,6 +132,11 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	target := normalizeTarget(targets[0])
+
+	if *asJSON && *asSARIF {
+		fmt.Fprintln(stderr, "solitools scan: -json and -sarif are mutually exclusive")
+		return 2
+	}
 
 	shade, err := term.ParseMode(*colorMode)
 	if err != nil {
@@ -164,12 +171,13 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// JSON output must stay parseable: no banner and no live status block.
-	if !*asJSON && !*quiet {
+	// Machine formats must stay parseable: no banner and no live status block.
+	machine := *asJSON || *asSARIF
+	if !machine && !*quiet {
 		writeBanner(stdout, theme, target, threshold, *rate)
 	}
 	live := progress.New(stdout, theme, client)
-	if !*asJSON && !*quiet {
+	if !machine && !*quiet {
 		live.Start()
 	}
 
@@ -196,6 +204,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		Quiet:     *quiet,
 		Width:     *width,
 		JSON:      *asJSON,
+		SARIF:     *asSARIF,
 		Elapsed:   time.Since(start),
 		Version:   version,
 		Theme:     theme,
