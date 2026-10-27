@@ -35,6 +35,8 @@ const (
 	DefaultMaxPathWords = 20
 	// DefaultMaxForms caps POST form probing, which is opt-in.
 	DefaultMaxForms = 3
+	// DefaultMaxStoredPages caps stored-reflection re-fetches, which are opt-in.
+	DefaultMaxStoredPages = 5
 )
 
 // Options configures a scan.
@@ -56,6 +58,12 @@ type Options struct {
 	EnableForms bool
 	// MaxForms caps how many POST forms are probed.
 	MaxForms int
+	// EnableStored re-fetches known pages after probing to find values the
+	// server kept. Off by default: it costs extra requests and reports state a
+	// POST may have written.
+	EnableStored bool
+	// MaxStoredPages caps how many pages the stored pass re-fetches.
+	MaxStoredPages int
 	// Progress is called at each pipeline stage with a short human label. It is
 	// always invoked from the goroutine that called Run, never concurrently.
 	Progress func(stage string)
@@ -81,6 +89,9 @@ func (o Options) normalized() Options {
 	if o.MaxForms <= 0 {
 		o.MaxForms = DefaultMaxForms
 	}
+	if o.MaxStoredPages <= 0 {
+		o.MaxStoredPages = DefaultMaxStoredPages
+	}
 	return o
 }
 
@@ -93,6 +104,7 @@ type Stats struct {
 	Endpoints         int            `json:"endpoints"`
 	Parameters        int            `json:"parameters"`
 	Forms             int            `json:"forms"`
+	StoredPages       int            `json:"stored_pages,omitempty"`
 	Gated             int            `json:"gated"`
 	ByReason          map[string]int `json:"gated_by_reason,omitempty"`
 }
@@ -132,7 +144,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	result.Stats.Pages = 1
 	result.Target = page.URL
 
-	collected := &collector{byReason: make(map[string]int)}
+	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission)}
 	// The page body already contains every inline script, so scanning it once
 	// covers them; scanning them separately would double-count the same secret.
 	collected.addSecret(scanner.Scan(secret.Document{Source: page.URL, Body: page.Body}))
@@ -203,12 +215,17 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	for _, probe := range probes {
 		probe := probe
 		probeGroup.Go(func() error {
-			candidate, ok := reflectAnalyzer.Probe(probeCtx, reflect.Target{
+			submission := reflectAnalyzer.Submit(probeCtx, reflect.Target{
 				URL: probe.URL, Name: probe.Name, Interest: probe.Interest,
 				Method: probe.Method, Fields: probe.Fields,
 			})
-			if ok {
+			if candidate, ok := reflect.Analyze(submission); ok {
 				collected.addFinding(candidate)
+			}
+			// The submission is kept only if a response arrived: a value that was
+			// never accepted cannot have been stored.
+			if options.EnableStored && submission.Status != 0 {
+				collected.addSubmission(storagePage(probe.URL, probe.Name, probe.Method), submission)
 			}
 			if redirect.IsRedirectParam(probe.Name) {
 				redirected, ok := redirectAnalyzer.Probe(probeCtx, redirect.Target{
@@ -223,6 +240,35 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		})
 	}
 	_ = probeGroup.Wait()
+
+	// Stored reflection is a second-pass question about the same submissions:
+	// the page is fetched again later in the run, and only canaries that were
+	// absent from the immediate response can qualify.
+	if options.EnableStored {
+		options.reportProgress("checking stored reflections")
+		if containsCanary(page.Body) {
+			// A canary already in the first response means an earlier run (or
+			// the page itself) contaminated the baseline; every hit would be a
+			// false attribution to this scan.
+			result.Warnings = append(result.Warnings, "stored check skipped: the target body already contained a canary")
+		} else {
+			pages := collected.storedPages(options.MaxStoredPages)
+			storedGroup, storedCtx := errgroup.WithContext(ctx)
+			storedGroup.SetLimit(2)
+			for _, pageURL := range pages {
+				pageURL := pageURL
+				submissions := collected.submissionsFor(pageURL)
+				storedGroup.Go(func() error {
+					for _, candidate := range reflectAnalyzer.Stored(storedCtx, pageURL, submissions) {
+						collected.addFinding(candidate)
+					}
+					return nil
+				})
+			}
+			_ = storedGroup.Wait()
+			result.Stats.StoredPages = len(pages)
+		}
+	}
 
 	if !options.SkipPath {
 		options.reportProgress("scanning sensitive paths")
@@ -270,8 +316,11 @@ type collector struct {
 	findings  []finding.Finding
 	endpoints []string
 	params    []probeTarget
-	gated     int
-	byReason  map[string]int
+	// stored maps a page to the submissions whose values could have been
+	// persisted there; the stored pass re-fetches each page once.
+	stored   map[string][]reflect.Submission
+	gated    int
+	byReason map[string]int
 }
 
 // probeTarget is one parameter to probe, with the page that carries it.
@@ -299,6 +348,37 @@ func (c *collector) addFinding(candidate finding.Finding) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.findings = append(c.findings, candidate)
+}
+
+func (c *collector) addSubmission(page string, submission reflect.Submission) {
+	if page == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stored[page] = append(c.stored[page], submission)
+}
+
+// storedPages returns the pages to re-fetch in a deterministic order.
+func (c *collector) storedPages(limit int) []string {
+	c.mu.Lock()
+	pages := make([]string, 0, len(c.stored))
+	for page := range c.stored {
+		pages = append(pages, page)
+	}
+	c.mu.Unlock()
+
+	sort.Strings(pages)
+	if len(pages) > limit {
+		pages = pages[:limit]
+	}
+	return pages
+}
+
+func (c *collector) submissionsFor(page string) []reflect.Submission {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]reflect.Submission(nil), c.stored[page]...)
 }
 
 func (c *collector) addEndpoints(endpoints []string) {
@@ -416,6 +496,36 @@ func sameOrigin(action string, base *url.URL) bool {
 		return false
 	}
 	return strings.EqualFold(parsed.Host, base.Host)
+}
+
+// storagePage is where a submitted value would reappear: the page that received
+// it, with the probed parameter removed. Leaving the canary in the query string
+// would make the re-fetch echo it and fabricate a stored finding of its own.
+func storagePage(rawURL, name, method string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	parsed.Fragment = ""
+	if !strings.EqualFold(method, http.MethodPost) {
+		query := parsed.Query()
+		query.Del(name)
+		parsed.RawQuery = query.Encode()
+		parsed.ForceQuery = false
+	}
+	return parsed.String()
+}
+
+// containsCanary reports whether a body already carries a probe canary, which
+// makes it unusable as a stored-detection baseline.
+func containsCanary(body []byte) bool {
+	text := string(body)
+	for _, canary := range reflect.Payloads() {
+		if strings.Contains(text, canary) {
+			return true
+		}
+	}
+	return false
 }
 
 // dedupe collapses repeated evidence and records how often it was seen.

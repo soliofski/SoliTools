@@ -23,7 +23,7 @@ import (
 	"solitools/internal/term"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -71,6 +71,7 @@ Flags for scan:
   -max-params int         maximum parameters to probe (default 10)
   -skip-path              skip the sensitive-path wordlist
   -forms                  submit POST forms (may change state; same-origin only)
+  -stored                 re-fetch known pages to detect stored/blind XSS
   -verbose                show the score derivation
   -quiet                  print only a one-line summary (CI mode)
   -width int              wrap output to this many columns (0 = detect)
@@ -113,6 +114,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	maxParams := flags.Int("max-params", scan.DefaultMaxParams, "maximum parameters to probe")
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
 	submitForms := flags.Bool("forms", false, "submit POST forms (may change state; same-origin only)")
+	stored := flags.Bool("stored", false, "re-fetch known pages to detect stored/blind reflection")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
 	quiet := flags.Bool("quiet", false, "print only a one-line summary")
 	width := flags.Int("width", 0, "wrap output to this many columns (0 = detect)")
@@ -189,7 +191,9 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		SkipPath:  *skipPath,
 		// Opt-in: a form submission can create records or send mail.
 		EnableForms: *submitForms,
-		Progress:    live.Stage,
+		// Opt-in: extra requests, and the answer may be state a POST wrote.
+		EnableStored: *stored,
+		Progress:     live.Stage,
 	})
 	live.Stop()
 	if err != nil {

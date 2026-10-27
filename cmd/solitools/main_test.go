@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -303,6 +304,50 @@ func TestFormsProbingIsOptIn(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Method:") {
 		t.Fatalf("the finding does not identify the method:\n%s", stdout)
+	}
+}
+
+func TestStoredProbingIsOptIn(t *testing.T) {
+	var mu sync.Mutex
+	var saved string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><form action="/guestbook" method="post">`+
+			`<input name="message"></form></body></html>`)
+	})
+	mux.HandleFunc("/guestbook", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.ParseForm()
+			mu.Lock()
+			saved = r.PostFormValue("message")
+			mu.Unlock()
+			w.Write([]byte("<html><body>thanks</body></html>"))
+			return
+		}
+		mu.Lock()
+		value := saved
+		mu.Unlock()
+		fmt.Fprintf(w, "<html><body><div>%s</div></body></html>", value)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	code, stdout, _ := runCLI(t, "scan", "-forms", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 without -stored:\n%s", code, stdout)
+	}
+
+	code, stdout, _ = runCLI(t, "scan", "-forms", "-stored", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1 with -stored:\n%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "Stored XSS") {
+		t.Fatalf("no stored finding reported:\n%s", stdout)
 	}
 }
 

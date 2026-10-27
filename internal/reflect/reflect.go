@@ -108,40 +108,76 @@ func Classify(body string, offset int) Context {
 // intact: a lone alphanumeric echo is usually an error page repeating the
 // query, which is exactly the false positive this module must not produce.
 func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, bool) {
+	return Analyze(a.Submit(ctx, target))
+}
+
+// Submission is the evidence one probe produced: which canaries were sent to
+// which parameter, and which of them came back in the immediate response.
+//
+// It exists so the same requests can answer two questions. Probe asks "was the
+// input echoed?"; the stored pass asks "was it kept?" later in the run, without
+// sending anything again.
+type Submission struct {
+	Target    Target
+	Status    int
+	Body      string
+	Reflected map[string]bool
+}
+
+// Submit sends every canary once and records the outcome.
+func (a *Analyzer) Submit(ctx context.Context, target Target) Submission {
+	submission := Submission{Target: target, Reflected: make(map[string]bool, len(Payloads()))}
 	if a == nil || a.client == nil || target.Name == "" || target.URL == "" {
-		return finding.Finding{}, false
+		return submission
 	}
 
-	canaries := Payloads()
-	reflected := make(map[string]bool, len(canaries))
-	status := 0
-	body := ""
-	payloadUsed := ""
-	point := ContextUnknown
-
-	for _, payload := range canaries {
+	for _, payload := range Payloads() {
 		response, err := a.send(ctx, target, payload)
 		if err != nil {
 			continue
 		}
-		status = response.Status
+		submission.Status = response.Status
 		text := response.BodyString()
 
 		offset := strings.Index(text, payload)
 		if offset < 0 {
 			continue // escaped or absent: not a raw reflection
 		}
-		reflected[payload] = true
-		if payloadUsed == "" {
-			payloadUsed = payload
-			body = text
-			point = Classify(text, offset)
+		submission.Reflected[payload] = true
+		if submission.Body == "" {
+			submission.Body = text
 		}
+	}
+	return submission
+}
+
+// Analyze turns a submission into a reflection finding.
+func Analyze(submission Submission) (finding.Finding, bool) {
+	canaries := Payloads()
+	if len(submission.Reflected) == 0 {
+		return finding.Finding{}, false
+	}
+
+	payloadUsed := ""
+	for _, payload := range canaries {
+		if submission.Reflected[payload] {
+			payloadUsed = payload
+			break
+		}
+	}
+	if payloadUsed == "" {
+		return finding.Finding{}, false
+	}
+
+	body := submission.Body
+	point := ContextUnknown
+	if offset := strings.Index(body, payloadUsed); offset >= 0 {
+		point = Classify(body, offset)
 	}
 
 	// The tag-breaking canary is the most informative one.
-	strong := reflected[canaries[2]]
-	if len(reflected) < 2 && !strong {
+	strong := submission.Reflected[canaries[2]]
+	if len(submission.Reflected) < 2 && !strong {
 		return finding.Finding{}, false
 	}
 
@@ -156,11 +192,11 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 	case ContextComment:
 		builder.Add("context", -25, "reflected inside a comment: not executable")
 	}
-	if len(reflected) >= 2 {
-		builder.Add("consistent", 10, fmt.Sprintf("%d of %d canaries reflected", len(reflected), len(canaries)))
+	if len(submission.Reflected) >= 2 {
+		builder.Add("consistent", 10, fmt.Sprintf("%d of %d canaries reflected", len(submission.Reflected), len(canaries)))
 	}
-	if status >= 400 {
-		builder.Add("error-response", -10, fmt.Sprintf("reflection on a %d response", status))
+	if submission.Status >= 400 {
+		builder.Add("error-response", -10, fmt.Sprintf("reflection on a %d response", submission.Status))
 	}
 	if looksLikeErrorPage(body) {
 		builder.Add("error-page", -10, "response body looks like a generic error page")
@@ -171,19 +207,123 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 		Category:   "Reflected XSS",
 		RuleID:     "reflect.html",
 		Title:      "Potential Reflected XSS",
-		URL:        target.URL,
+		URL:        submission.Target.URL,
 		Value:      payloadUsed,
 		Context:    snippet(body, payloadUsed),
 		Confidence: builder.Build(),
 	}
-	candidate.WithField("Parameter", target.Name)
-	if isFormPost(target.Method) {
+	candidate.WithField("Parameter", submission.Target.Name)
+	if isFormPost(submission.Target.Method) {
 		candidate.WithField("Method", http.MethodPost)
 	}
 	candidate.WithField("Reflection Point", string(point))
 	candidate.WithField("Payload", payloadUsed)
-	candidate.WithField("Status", fmt.Sprintf("%d", status))
+	candidate.WithField("Status", fmt.Sprintf("%d", submission.Status))
 	return candidate, true
+}
+
+// Stored re-fetches one page and reports canaries that were submitted earlier,
+// were absent from the immediate response, and are served by that page now.
+//
+// This is the stored half of the model: Submit answers "is the input echoed
+// right away?", Stored answers "did the server keep it?". A canary that came
+// back immediately is excluded, because that is reflection and Probe already
+// reported it, so the two rules never describe the same evidence.
+//
+// Precision rules mirror Probe: a stored value needs two intact canaries or the
+// tag-breaking one, so an encoded copy that only preserved the alphanumeric
+// canary is not reported. Detection is same-origin and page-bound — there is no
+// out-of-band listener, so a value that only surfaces in an admin panel stays
+// invisible, and a 4xx page is ignored.
+func (a *Analyzer) Stored(ctx context.Context, page string, submissions []Submission) []finding.Finding {
+	if a == nil || a.client == nil || page == "" || len(submissions) == 0 {
+		return nil
+	}
+	response, err := a.client.Get(ctx, page)
+	if err != nil || response.Status >= 400 {
+		return nil
+	}
+
+	body := response.BodyString()
+	errorPage := looksLikeErrorPage(body)
+	canaries := Payloads()
+	findings := make([]finding.Finding, 0, len(submissions))
+
+	for _, submission := range submissions {
+		persisted := persistedCanaries(body, submission.Reflected)
+		if len(persisted) == 0 {
+			continue
+		}
+
+		// Same arithmetic as the reflected rule: two canaries, or the one that
+		// proves angle brackets survived unencoded.
+		payloadUsed := ""
+		for _, candidate := range persisted {
+			if candidate == canaries[2] {
+				payloadUsed = candidate
+			}
+		}
+		if payloadUsed == "" {
+			if len(persisted) < 2 {
+				continue
+			}
+			payloadUsed = persisted[0]
+		}
+
+		point := Classify(body, strings.Index(body, payloadUsed))
+
+		builder := confidence.New(65)
+		switch point {
+		case ContextHTMLText, ContextAttribute:
+			builder.Add("context", 20, "stored in "+string(point))
+		case ContextScript:
+			builder.Add("context", 12, "stored inside JavaScript")
+		case ContextComment:
+			builder.Add("context", -25, "stored inside a comment: not executable")
+		}
+		if len(persisted) >= 2 {
+			builder.Add("consistent", 10, fmt.Sprintf("%d of %d canaries persisted", len(persisted), len(canaries)))
+		}
+		if errorPage {
+			builder.Add("error-page", -10, "response body looks like a generic error page")
+		}
+
+		candidate := finding.Finding{
+			Kind:       finding.KindReflect,
+			Category:   "Stored XSS",
+			RuleID:     "reflect.stored",
+			Title:      "Potential Stored XSS",
+			URL:        page,
+			Value:      payloadUsed,
+			Context:    snippet(body, payloadUsed),
+			Confidence: builder.Build(),
+		}
+		candidate.WithField("Parameter", submission.Target.Name)
+		if isFormPost(submission.Target.Method) {
+			candidate.WithField("Method", http.MethodPost)
+		}
+		candidate.WithField("Reflection Point", string(point))
+		candidate.WithField("Payload", payloadUsed)
+		candidate.WithField("Storage", "absent from the immediate response, served on re-fetch")
+		candidate.WithField("Status", fmt.Sprintf("%d", response.Status))
+		findings = append(findings, candidate)
+	}
+	return findings
+}
+
+// persistedCanaries lists the canaries present in body that were not part of
+// the immediate response.
+func persistedCanaries(body string, reflected map[string]bool) []string {
+	out := make([]string, 0, len(Payloads()))
+	for _, payload := range Payloads() {
+		if reflected[payload] {
+			continue
+		}
+		if strings.Contains(body, payload) {
+			out = append(out, payload)
+		}
+	}
+	return out
 }
 
 // looksLikeErrorPage detects the generic "nothing found" responses that echo

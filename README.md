@@ -70,6 +70,7 @@ usage or runtime error.
 | `-max-params` | 10 | parameters actively probed |
 | `-skip-path` | off | skip the sensitive-path wordlist |
 | `-forms` | off | submit POST forms (may change state; same-origin only) |
+| `-stored` | off | re-fetch known pages to detect stored/blind XSS |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
 | `-sarif` | off | SARIF 2.1.0 log for code scanning (excludes `-json`) |
@@ -255,6 +256,20 @@ Scoring: +15 unencoded, +20 in HTML body/attribute, +12 in JavaScript, **−25 i
 a comment**, +10 for consistency across canaries, −10 on a 4xx/5xx response,
 −15 when the body reads like a generic error page.
 
+`-stored` adds a second pass with a different question. After probing, the scan
+re-fetches each page that received a canary (one GET per page, capped at five)
+and looks for values the server kept. Only canaries **absent from the immediate
+response** qualify — an echoed value is reflection and is already reported — so
+the same evidence can never produce both findings. The page is fetched with the
+probed parameter removed, so the re-fetch cannot echo the canary by itself.
+
+Scoring: 65 base, +20 HTML body/attribute, +12 JavaScript, **−25 comment**, +10
+when several canaries persisted, −10 generic error page. The same arithmetic
+applies (two canaries, or the tag-breaking one), which rejects a stored but
+HTML-escaped copy. Detection is same-origin and limited to pages the scan
+already knows: there is no out-of-band listener, so a value that only surfaces
+in an admin panel stays invisible.
+
 ### redirect — open redirects
 
 Only redirect-specific parameters are tested, with five payload styles
@@ -291,8 +306,9 @@ and 200 responses score higher than 403s.
 
 - No live validation of credentials (no provider API calls); scores are
   structural.
-- Reflection detection is single-request, not time-based: stored XSS is out of
-  scope.
+- Reflection detection is single-shot on the page itself. With `-stored` the
+  scan re-fetches known pages once, later in the run; truly blind XSS needs an
+  out-of-band listener and is out of scope.
 - Path scanning uses a fixed wordlist capped at 20 entries by default.
 - Only `GET` requests are used; form and JSON bodies are not probed.
 - Third-party detection uses a small public-suffix table, not the full PSL.
@@ -300,7 +316,6 @@ and 200 responses score higher than 403s.
 
 ## Next steps
 
-1. Stored/blind reflection variants: a single-shot probe cannot see them.
-2. Parameter mining from source maps and JSON responses.
-3. Provider-specific live validation behind an explicit flag.
-4. SARIF output for CI.
+1. Parameter mining from source maps and JSON responses.
+2. Provider-specific live validation behind an explicit flag.
+3. Multi-page crawling behind a flag, so stored checks can reach listings.

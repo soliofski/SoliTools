@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.7.0` · **Branch:** `main` · **Commits:** 8
-**Size:** 46 Go files, ~6,800 lines, 129 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.8.0` · **Branch:** `main` · **Commits:** 12
+**Size:** 49 Go files (30 source, 19 test), ~8,100 lines including tests, 143 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -106,6 +106,8 @@ detection, or gates: some failures only appear for certain random keys.
 | `-timeout` | 15s | per-request timeout, body included |
 | `-max-params` | 10 | parameters actively probed |
 | `-skip-path` | off | skip the sensitive-path wordlist |
+| `-forms` | off | submit POST forms (state-changing; same-origin only) |
+| `-stored` | off | re-fetch known pages to detect stored / blind XSS |
 | `-verbose` | off | print the score derivation and signals |
 | `-quiet` | off | one-line summary only; implies plain output |
 | `-width` | 0 | wrap to N columns; `0` detects the terminal |
@@ -540,6 +542,25 @@ Scoring: base 45, +15 unencoded, +20 HTML body/attribute, +12 JavaScript,
 `Classify(body, offset)` distinguishes comment, inside-tag (attribute),
 script, JSON and plain text. It is the most testable part; use it directly.
 
+**Stored / blind pass.** `Submit` records which canaries were sent and which
+came back immediately; `Probe` is now `Analyze(Submit(...))`, so the same three
+requests answer both questions. With `-stored`, `scan` re-fetches each page that
+received a submission (`storagePage`: the URL with the probed parameter removed,
+so the re-fetch cannot echo the canary) once per page, capped at
+`DefaultMaxStoredPages` (5), and calls `reflect.Stored`.
+
+`Stored` only reports canaries that are **absent from the immediate response**,
+which keeps it disjoint from `Probe`: a reflected value is never re-reported as
+stored. It applies the same 2-canary-or-tag-break rule, so an HTML-escaped copy
+that only preserved `solix1z9q` is not reported. Scoring: base 65, +20 HTML
+body/attribute, +12 JavaScript, −25 comment, +10 when several canaries
+persisted, −10 generic error page. `scan` also refuses to run the pass when the
+first response already contains a canary (contaminated baseline; reported as a
+warning), and a 4xx re-fetch yields nothing.
+
+Limits: same-origin, page-bound, one observation point. There is no out-of-band
+listener, so truly blind XSS that only surfaces in an admin panel is invisible.
+
 ### 8.5 `redirect` — verification, not reflection
 
 Only redirect-specific parameter names are probed (`IsRedirectParam`). Five
@@ -639,22 +660,22 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-129 test functions. The distribution matters more than the number:
+143 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
 | `secret` (21) | every rule positive, plus explicit false-positive regressions |
 | `report` (16) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
 | `term` (11) | mode precedence, palette mapping, width parsing |
-| `cmd` (14) | exit codes, flags, JSON schema, quiet, colour, form opt-in |
+| `cmd` (17) | exit codes, flags, JSON schema, quiet, colour, form and stored opt-in |
 | `form` (10) | action resolution, field classes, destructive detection |
 | `httpx` (7) | POST body, redirect policy, header injection, error classes |
 | `js` (6) | script resolution, third-party, endpoint filtering |
 | `param` (4) | classification, noise removal |
-| `reflect` (5) | context classification, POST bodies, escaped reflection rejected |
-| `redirect` (7) | external verified, internal ignored, echo ignored, backslash forms |
+| `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
+| `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
 | `pathscan` (3) | status filter, soft-404, catch-all host |
-| `scan` (6) | full pipeline, form opt-in, cross-origin rejection |
+| `scan` (9) | full pipeline, form opt-in, cross-origin rejection, stored opt-in and baseline guard |
 | `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 
@@ -679,6 +700,7 @@ hosts.
 | Generic rules cannot reach the default threshold alone | `TestGenericRulesStayBelowDefaultThreshold` |
 | One credential yields one finding | vendor table + `TestRunEndToEnd` occurrences |
 | A reflection needs 2 canaries or the tag canary | `TestProbeRejectsEscapedReflection` |
+| A stored finding never repeats a reflected one | `TestStoredIgnoresImmediateReflection` |
 | An open redirect needs an external `Location` | `TestProbeIgnoresInternalRedirect` |
 | A catch-all host yields no path findings | `TestProbeSkipsCatchAllHosts` |
 | Scores are deterministic and clamped | `internal/confidence` tests |
@@ -725,9 +747,9 @@ hosts.
 | done | ~~POST and form parameters~~ | Shipped in 0.5.0 as `-forms`: forms parsed, GET forms folded into the URL path, POST probing opt-in with same-origin and destructive filters. |
 | done | ~~SARIF output~~ | Shipped in 0.6.0 as `-sarif`. |
 | done | ~~More secret rules~~ | Shipped in 0.7.0: JSON-escaped PEM, Discord webhooks, Telegram bot tokens, Azure SAS. |
-| 1 | **Stored / blind reflection** | Requires a second fetch later in the run; a different detection model from the current single-shot probe. |
-| 2 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. |
-| 3 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
+| done | ~~Stored / blind reflection~~ | Shipped in 0.8.0 as `-stored`: `Submit` keeps the evidence, a second pass re-fetches known pages, and only canaries absent from the immediate response qualify. Same-origin, capped at five pages, no out-of-band listener. |
+| 1 | **Multi-page crawl** | The tool scans exactly one page. Following same-site links (depth 1, capped) would multiply coverage but also request count — gate it behind a flag. It is also what makes stored checks reach a listing page. |
+| 2 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.
@@ -736,9 +758,12 @@ reports evidence; it does not weaponise it.
 
 ## 14. Known limitations (be honest about these)
 
-- Single page, `GET` only. No forms, no JSON bodies, no cookies beyond `-cookie`.
-- No stored/blind XSS, no DOM XSS analysis (the `js` module extracts endpoints,
-  it does not execute or symbolically evaluate JavaScript).
+- Single page. `GET` by default; POST only for forms behind `-forms`. No JSON
+  bodies, no cookies beyond `-cookie`.
+- Stored reflection is observed once, later in the same run, and only on pages
+  the scan already knows. No out-of-band blind detection, no DOM XSS analysis
+  (the `js` module extracts endpoints, it does not execute or symbolically
+  evaluate JavaScript).
 - Path scanning uses a fixed 26-entry list.
 - Third-party detection uses a small suffix table, so exotic TLDs (`co.zw`,
   `com.ar`) may be misclassified.

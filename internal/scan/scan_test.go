@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"solitools/internal/finding"
@@ -233,5 +234,161 @@ func TestRunRejectsInvalidTarget(t *testing.T) {
 func TestRunRequiresClient(t *testing.T) {
 	if _, err := Run(context.Background(), Options{Target: "https://example.com"}); err == nil {
 		t.Fatal("a missing client must be an error")
+	}
+}
+
+// storedServer keeps the last submitted form value and serves it back from the
+// action page, which is exactly what a guestbook does.
+func storedServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	var saved string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body>`+
+			`<form action="/guestbook" method="post"><input name="message"></form>`+
+			`</body></html>`)
+	})
+	mux.HandleFunc("/guestbook", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.ParseForm()
+			mu.Lock()
+			saved = r.PostFormValue("message")
+			mu.Unlock()
+			w.Write([]byte("<html><body>thanks</body></html>"))
+			return
+		}
+		mu.Lock()
+		value := saved
+		mu.Unlock()
+		fmt.Fprintf(w, "<html><body><div>%s</div></body></html>", value)
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func storedFindings(result Result) []finding.Finding {
+	out := make([]finding.Finding, 0, 1)
+	for _, candidate := range result.Findings {
+		if candidate.RuleID == "reflect.stored" {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func TestRunDetectsStoredReflectionWhenEnabled(t *testing.T) {
+	server := storedServer(t)
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// Off by default: the same submission happens, but nothing is re-fetched.
+	off, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client, SkipPath: true, EnableForms: true,
+	})
+	if err != nil {
+		t.Fatalf("Run without stored: %v", err)
+	}
+	if len(storedFindings(off)) != 0 {
+		t.Fatalf("stored findings without -stored: %+v", off.Findings)
+	}
+	if off.Stats.StoredPages != 0 {
+		t.Fatalf("stored pages = %d, want 0 when the pass is off", off.Stats.StoredPages)
+	}
+
+	on, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client, SkipPath: true,
+		EnableForms: true, EnableStored: true,
+	})
+	if err != nil {
+		t.Fatalf("Run with stored: %v", err)
+	}
+	stored := storedFindings(on)
+	if len(stored) != 1 {
+		t.Fatalf("stored findings = %d, want 1: %+v", len(stored), on.Findings)
+	}
+	if stored[0].URL != server.URL+"/guestbook" {
+		t.Fatalf("stored URL = %q, want the page that served it", stored[0].URL)
+	}
+	if stored[0].Confidence.Value < 75 {
+		t.Fatalf("confidence = %v, want high", stored[0].Confidence.Value)
+	}
+	if on.Stats.StoredPages != 1 {
+		t.Fatalf("stored pages = %d, want 1", on.Stats.StoredPages)
+	}
+}
+
+// TestRunSkipsStoredOnContaminatedBaseline refuses to attribute a canary that
+// was already in the first response to this scan.
+func TestRunSkipsStoredOnContaminatedBaseline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><body><p>solix1z9q</p><form action="/save" method="post">`+
+			`<input name="message"></form></body></html>`)
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/", Client: client, SkipPath: true,
+		EnableForms: true, EnableStored: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.StoredPages != 0 {
+		t.Fatalf("stored pages = %d, want 0 on a contaminated baseline", result.Stats.StoredPages)
+	}
+	found := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "already contained a canary") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want the skip reason", result.Warnings)
+	}
+}
+
+func TestStoragePage(t *testing.T) {
+	cases := []struct {
+		name   string
+		url    string
+		param  string
+		method string
+		want   string
+	}{
+		{
+			// The probed parameter must not survive, or the re-fetch echoes it.
+			name: "get drops the probed parameter",
+			url:  "https://target.test/list?page=1&q=hello#top", param: "q", want: "https://target.test/list?page=1",
+		},
+		{
+			name: "post keeps the action query",
+			url:  "https://target.test/save?step=2", param: "message", method: http.MethodPost,
+			want: "https://target.test/save?step=2",
+		},
+		{
+			name: "plain page",
+			url:  "https://target.test/", param: "q", want: "https://target.test/",
+		},
+	}
+	for _, c := range cases {
+		if got := storagePage(c.url, c.param, c.method); got != c.want {
+			t.Errorf("%s: storagePage = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
