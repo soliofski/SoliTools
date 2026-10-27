@@ -48,6 +48,35 @@ func TestProbeDetectsExternalRedirect(t *testing.T) {
 	}
 }
 
+func TestProbeDetectsBackslashRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("next")
+		// A filter that blocks "//" and "http://" but forgets that a browser
+		// treats a leading backslash as a slash.
+		if strings.HasPrefix(target, `/\`) || strings.HasPrefix(target, `\\`) || strings.HasPrefix(target, `\/`) {
+			// Set the header directly: http.Redirect rewrites relative paths and
+			// would blur exactly what this test is about.
+			w.Header().Set("Location", target)
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Write([]byte("blocked"))
+	}))
+	defer server.Close()
+
+	analyzer := New(newTestClient(t))
+	finding, ok := analyzer.Probe(context.Background(), Target{URL: server.URL + "/?next=/home", Name: "next"})
+	if !ok {
+		t.Fatal("a reflected backslash redirect must be detected")
+	}
+	if finding.Confidence.Value < 90 {
+		t.Fatalf("confidence = %v, want critical", finding.Confidence.Value)
+	}
+	if finding.Context != `/\example.com/solitools-redirect-check` {
+		t.Fatalf("reported Location = %q, want the raw header", finding.Context)
+	}
+}
+
 func TestProbeIgnoresInternalRedirect(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/home", http.StatusFound)
@@ -97,6 +126,20 @@ func TestLeavesSite(t *testing.T) {
 	}{
 		{"https://example.com/solitools-redirect-check", true},
 		{"//example.com/solitools-redirect-check", true},
+		// Browsers normalise a backslash to a slash in the authority position,
+		// so these are all "//example.com/..." and all leave the site.
+		{`/\example.com/solitools-redirect-check`, true},
+		{`\\example.com/solitools-redirect-check`, true},
+		{`\/example.com/solitools-redirect-check`, true},
+		{`/\notexample.com/solitools-redirect-check`, false},
+		// A single slash is a path, not an authority separator.
+		{`/example.com/solitools-redirect-check`, false},
+		// A UNC-style path is not a URL and must not be reported.
+		{`\\server\share\solitools-redirect-check`, false},
+		// Userinfo must never be mistaken for the host.
+		{`//example.com@evil.test/solitools-redirect-check`, false},
+		// Hostnames are case-insensitive.
+		{"HTTPS://EXAMPLE.COM/solitools-redirect-check", true},
 		{"/home", false},
 		{"https://example.com/other", false},
 		{"https://notexample.com/solitools-redirect-check", false},

@@ -121,21 +121,45 @@ func (a *Analyzer) Probe(ctx context.Context, target Target) (finding.Finding, b
 	return finding.Finding{}, false
 }
 
-// leavesSite reports whether location resolves to the canary host and is not a
-// relative path. A protocol-relative value counts as external.
+// leavesSite reports whether location resolves to the canary host and carries
+// the canary path. Relative and internal targets are rejected.
+//
+// base is accepted for call-site symmetry and cannot change the verdict: a
+// Location that only becomes absolute through base is, by definition, internal.
 func leavesSite(location, base string) bool {
-	candidate := location
-	if strings.HasPrefix(candidate, "//") {
-		candidate = "https:" + candidate
-	}
-	parsed, err := url.Parse(candidate)
+	parsed, err := url.Parse(normalizeLocation(location))
 	if err != nil {
 		return false
 	}
-	if parsed.Hostname() != canaryHost {
+	// Hostnames are case-insensitive; a server may normalise the case of the
+	// echoed value.
+	if !strings.EqualFold(parsed.Hostname(), canaryHost) {
 		return false
 	}
 	return strings.Contains(parsed.Path, "solitools-redirect-check")
+}
+
+// normalizeLocation rewrites a scheme-relative Location into an absolute URL.
+//
+// Browsers treat a backslash as a slash in the authority position, so "/\host",
+// "\/host" and "\\host" all mean "//host". A filter that only blocks "//" lets
+// those through, and the server may echo the value back verbatim; normalising
+// the leading run before parsing turns such an echo into a detectable external
+// redirect instead of an unparseable relative path.
+//
+// A single leading slash is a path and must stay one, otherwise every internal
+// redirect would look external.
+func normalizeLocation(location string) string {
+	candidate := strings.TrimSpace(location)
+
+	separators := 0
+	for separators < len(candidate) && (candidate[separators] == '/' || candidate[separators] == '\\') {
+		separators++
+	}
+	if separators >= 2 {
+		return "https://" + candidate[separators:]
+	}
+	return candidate
 }
 
 func withParam(rawURL, name, value string) (string, error) {

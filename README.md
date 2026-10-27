@@ -218,7 +218,10 @@ a comment**, +10 for consistency across canaries, −10 on a 4xx/5xx response,
 Only redirect-specific parameters are tested, with three payload styles
 (`https://`, `//`, `/\`). A finding requires an actual `Location` header
 pointing at the canary host — an echoed value is not a redirect, and a relative
-redirect is normal application behaviour, not a vulnerability.
+redirect is normal application behaviour, not a vulnerability. A `Location`
+that echoes the backslash form is normalised before analysis, because browsers
+treat a leading backslash as a slash: a filter that only blocks `//` does not
+hide the finding.
 
 ### path — sensitive paths
 

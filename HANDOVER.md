@@ -528,6 +528,15 @@ payload styles (`https://`, `//`, `/\`) point at `example.com`, which is
 reserved by RFC 2606 and never contacted — only the `Location` header is read.
 A relative redirect is normal behaviour and is never reported.
 
+`normalizeLocation` handles the backslash family: browsers read `\` as `/` in
+the authority position, so `/\host`, `\/host` and `\\host` are all `//host`.
+Without that normalisation, a server that echoes the backslash payload produces
+a `Location` Go parses as a relative path with an empty host, and the module
+silently misses a real open redirect. A **single** leading slash must stay a
+path — normalising it would make every internal redirect look external — and a
+UNC-style `\\server\share` path must still fail to parse as a host. Both cases
+are pinned in `TestLeavesSite`.
+
 ### 8.6 `pathscan` — small, high-value wordlist
 
 26 entries (`.env`, `.git/config`, `.aws/credentials`, `id_rsa`, backups,
