@@ -180,6 +180,42 @@ func TestColorModeRejectsGarbage(t *testing.T) {
 	}
 }
 
+func TestQuietPrintsASingleLine(t *testing.T) {
+	server := leakingServer(t)
+	code, stdout, _ := runCLI(t, "scan", "-quiet", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	out := strings.TrimSpace(stdout)
+	if strings.Contains(out, "\n") {
+		t.Fatalf("quiet printed more than one line: %q", out)
+	}
+	if !strings.Contains(out, "1 finding") || !strings.Contains(out, "request") {
+		t.Fatalf("quiet summary = %q", out)
+	}
+	if strings.Contains(out, "[SECRET]") || strings.Contains(out, "SoliTools") {
+		t.Fatalf("quiet printed detail or banner: %q", out)
+	}
+}
+
+func TestQuietKeepsJSONParseable(t *testing.T) {
+	server := leakingServer(t)
+	code, stdout, _ := runCLI(t, "scan", "-quiet", "-json", "-rate", "500", "-skip-path", server.URL+"/")
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("quiet+json is not JSON: %v\n%s", err, stdout)
+	}
+}
+
+func TestNegativeWidthIsRejected(t *testing.T) {
+	if code, _, _ := runCLI(t, "scan", "-width", "-5", "https://example.com"); code != 2 {
+		t.Fatalf("exit = %d, want 2 for a negative width", code)
+	}
+}
+
 func TestScanStrictHidesMediumHigh(t *testing.T) {
 	// A JWT scores 65: visible by default, hidden under -strict.
 	token := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0" + ".abcdefghijklmnopqrstuvwx"

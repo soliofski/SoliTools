@@ -38,6 +38,11 @@ type Options struct {
 	Version string
 	// Theme styles terminal output. Nil renders plain text.
 	Theme *term.Theme
+	// Width caps the rendered line length. Zero means "detect for a terminal";
+	// a non-terminal writer is left unwrapped so redirected text stays intact.
+	Width int
+	// Quiet prints a single summary line and nothing else.
+	Quiet bool
 }
 
 // row is one aligned detail line under a finding.
@@ -69,18 +74,45 @@ func Render(w io.Writer, result scan.Result, opts Options) (int, error) {
 	if opts.JSON {
 		return len(shown), writeJSON(w, result, shown, opts)
 	}
-	writeText(w, result, shown, opts)
+	if opts.Quiet {
+		writeQuiet(w, result, shown)
+		return len(shown), nil
+	}
+
+	width := opts.Width
+	if width <= 0 && term.IsTerminal(w) {
+		width = term.Width(w)
+	}
+	writeText(w, result, shown, opts, width)
 	return len(shown), nil
 }
 
-func writeText(w io.Writer, result scan.Result, shown []finding.Finding, opts Options) {
-	for _, candidate := range shown {
-		writeFinding(w, candidate, opts)
+// writeQuiet prints the CI summary: counts, bands and warnings, one line.
+func writeQuiet(w io.Writer, result scan.Result, shown []finding.Finding) {
+	parts := []string{
+		plural(len(shown), "finding", "findings"),
+		plural(result.Stats.Requests, "request", "requests"),
 	}
-	writeSummary(w, result, shown, opts)
+	if bands := plainBands(shown); len(shown) > 0 {
+		parts = append(parts, bands)
+	}
+	if hidden := len(result.Findings) - len(shown); hidden > 0 {
+		parts = append(parts, fmt.Sprintf("%d hidden", hidden))
+	}
+	if len(result.Warnings) > 0 {
+		parts = append(parts, plural(len(result.Warnings), "warning", "warnings"))
+	}
+	fmt.Fprintln(w, strings.Join(parts, " · "))
 }
 
-func writeFinding(w io.Writer, item finding.Finding, opts Options) {
+func writeText(w io.Writer, result scan.Result, shown []finding.Finding, opts Options, width int) {
+	for _, candidate := range shown {
+		writeFinding(w, candidate, opts, width)
+	}
+	writeSummary(w, result, shown, opts, width)
+}
+
+func writeFinding(w io.Writer, item finding.Finding, opts Options, width int) {
 	theme := opts.Theme
 
 	kind := theme.Color(term.KindColor(string(item.Kind)), "["+string(item.Kind)+"]")
@@ -106,33 +138,55 @@ func writeFinding(w io.Writer, item finding.Finding, opts Options) {
 		}
 	}
 
-	width := 0
+	labelCol := 0
 	for _, line := range rows {
-		if len(line.label)+1 > width {
-			width = len(line.label) + 1
+		if len(line.label)+1 > labelCol {
+			labelCol = len(line.label) + 1
 		}
 	}
 
-	for _, line := range rows {
-		label := theme.Dim(fmt.Sprintf("%-*s", width, line.label+":"))
-		value := line.value
-		switch line.label {
-		case "Value":
-			value = theme.Color("warning", value)
-		case "URL":
-			value = theme.Color("url", value)
+	// Zero means "no wrapping": pipes and files keep one line per field.
+	valueWidth := 0
+	if width > 0 {
+		valueWidth = width - 2 - labelCol - 1
+		if valueWidth < 24 {
+			valueWidth = 24
 		}
-		fmt.Fprintf(w, "  %s %s\n", label, value)
+	}
+	indent := strings.Repeat(" ", 2+labelCol+1)
+
+	for _, line := range rows {
+		label := theme.Dim(fmt.Sprintf("%-*s", labelCol, line.label+":"))
+		lineWidth := valueWidth
+		if line.label == "URL" {
+			// A URL must stay on one line: splitting it makes the one thing a
+			// reader wants to copy unusable.
+			lineWidth = 0
+		}
+		parts := wrapText(line.value, lineWidth)
+		for i, part := range parts {
+			switch line.label {
+			case "Value":
+				part = theme.Color("warning", part)
+			case "URL":
+				part = theme.Color("url", part)
+			}
+			if i == 0 {
+				fmt.Fprintf(w, "  %s %s\n", label, part)
+				continue
+			}
+			fmt.Fprintf(w, "%s%s\n", indent, part)
+		}
 	}
 	fmt.Fprintln(w)
 }
 
-func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts Options) {
+func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts Options, width int) {
 	theme := opts.Theme
 	hidden := len(result.Findings) - len(shown)
 
 	if !theme.Enabled() {
-		writePlainSummary(w, result, shown, hidden)
+		writePlainSummary(w, result, shown, hidden, width)
 		return
 	}
 
@@ -155,40 +209,66 @@ func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts
 	if len(result.Warnings) > 0 {
 		rows = append(rows, [2]string{"Warnings", fmt.Sprintf("%d", len(result.Warnings))})
 	}
-	writeBox(w, theme, "SoliTools", rows)
+	writeBox(w, theme, "SoliTools", rows, width)
 
 	for _, warning := range result.Warnings {
 		fmt.Fprintf(w, "%s %s\n", theme.Color("warning", "!"), warning)
 	}
 }
 
-func writePlainSummary(w io.Writer, result scan.Result, shown []finding.Finding, hidden int) {
-	fmt.Fprintf(w, "Requests: %d  Pages: %d  Scripts: %d  Endpoints: %d  Parameters: %d\n",
+func writePlainSummary(w io.Writer, result scan.Result, shown []finding.Finding, hidden int, width int) {
+	lines := []string{fmt.Sprintf("Requests: %d  Pages: %d  Scripts: %d  Endpoints: %d  Parameters: %d",
 		result.Stats.Requests, result.Stats.Pages, result.Stats.Scripts,
-		result.Stats.Endpoints, result.Stats.Parameters)
-	fmt.Fprintf(w, "Findings: %d", len(shown))
+		result.Stats.Endpoints, result.Stats.Parameters)}
+
+	summary := fmt.Sprintf("Findings: %d", len(shown))
 	if bands := plainBands(shown); bands != "" {
-		fmt.Fprintf(w, " (%s)", bands)
+		summary += " (" + bands + ")"
 	}
-	fmt.Fprintln(w)
+	lines = append(lines, summary)
+
 	if hidden > 0 {
-		fmt.Fprintf(w, "Below threshold: %d (use --all to display)\n", hidden)
+		lines = append(lines, fmt.Sprintf("Below threshold: %d (use --all to display)", hidden))
 	}
 	if result.Stats.Gated > 0 {
-		fmt.Fprintf(w, "Filtered at detection: %d (%s)\n", result.Stats.Gated, reasonSummary(result.Stats.ByReason))
+		lines = append(lines, fmt.Sprintf("Filtered at detection: %d (%s)", result.Stats.Gated, reasonSummary(result.Stats.ByReason)))
 	}
 	if len(result.Warnings) > 0 {
-		fmt.Fprintf(w, "Warnings: %d\n", len(result.Warnings))
-		for _, warning := range result.Warnings {
-			fmt.Fprintf(w, "  %s\n", warning)
-		}
+		lines = append(lines, fmt.Sprintf("Warnings: %d", len(result.Warnings)))
+		lines = append(lines, result.Warnings...)
+	}
+
+	for _, line := range lines {
+		writeWrapped(w, line, width, "  ")
 	}
 }
 
-// writeBox draws a rounded panel sized to its widest row.
-func writeBox(w io.Writer, theme *term.Theme, title string, rows [][2]string) {
+// writeWrapped prints text wrapped to width, indenting continuation lines.
+func writeWrapped(w io.Writer, text string, width int, indent string) {
+	for i, part := range wrapText(text, width) {
+		if i == 0 {
+			fmt.Fprintln(w, part)
+			continue
+		}
+		fmt.Fprintf(w, "%s%s\n", indent, part)
+	}
+}
+
+// writeBox draws a rounded panel sized to its widest row, capped to the
+// terminal so a narrow window never gets a border wider than itself.
+func writeBox(w io.Writer, theme *term.Theme, title string, rows [][2]string, terminalWidth int) {
 	const labelWidth = 10
-	const maxWidth = 78
+
+	limit := 78
+	if terminalWidth > 0 {
+		limit = terminalWidth - 2
+		if limit > 78 {
+			limit = 78
+		}
+		if limit < 36 {
+			limit = 36
+		}
+	}
 
 	width := len(title) + 8
 	for _, line := range rows {
@@ -196,8 +276,8 @@ func writeBox(w io.Writer, theme *term.Theme, title string, rows [][2]string) {
 			width = candidate
 		}
 	}
-	if width > maxWidth {
-		width = maxWidth
+	if width > limit {
+		width = limit
 	}
 	if width < 44 {
 		width = 44
@@ -219,6 +299,74 @@ func writeBox(w io.Writer, theme *term.Theme, title string, rows [][2]string) {
 		fmt.Fprintf(w, "│ %s%s%s │\n", theme.Dim(fmt.Sprintf("%-*s", labelWidth, line[0])), value, strings.Repeat(" ", padding))
 	}
 	fmt.Fprintf(w, "└%s┘\n", strings.Repeat("─", width-2))
+}
+
+// wrapText breaks text into lines of at most width runes.
+//
+// Words are preserved where possible; a token longer than the limit (a URL with
+// a long query string, a base64 blob) is hard-split instead of overflowing.
+// A width of zero disables wrapping.
+func wrapText(text string, width int) []string {
+	if width <= 0 || runeLen(text) <= width {
+		return []string{text}
+	}
+
+	var (
+		lines   []string
+		current []rune
+	)
+	flush := func() {
+		if len(current) > 0 {
+			lines = append(lines, string(current))
+			current = current[:0]
+		}
+	}
+
+	for _, word := range strings.Fields(text) {
+		runes := []rune(word)
+		if len(current) > 0 && len(current)+1+len(runes) <= width {
+			current = append(current, ' ')
+			current = append(current, runes...)
+			continue
+		}
+		flush()
+		for len(runes) > width {
+			head, rest := splitToken(runes, width)
+			lines = append(lines, string(head))
+			runes = rest
+		}
+		current = append(current, runes...)
+	}
+	flush()
+
+	if len(lines) == 0 {
+		return []string{text}
+	}
+	return lines
+}
+
+// splitToken cuts an over-long token, preferring a natural boundary such as a
+// path separator so a URL breaks at a readable point instead of mid-word.
+func splitToken(runes []rune, width int) ([]rune, []rune) {
+	if len(runes) <= width {
+		return runes, nil
+	}
+	for i := width; i > width/2; i-- {
+		previous := runes[i-1]
+		if previous == '<' {
+			// Break before a tag rather than inside it.
+			return runes[:i-1], runes[i-1:]
+		}
+		if previous == '/' && i >= 2 && runes[i-2] == '<' {
+			// A closing tag: keep "</body>" together.
+			return runes[:i-2], runes[i-2:]
+		}
+		switch previous {
+		case '/', '?', '&', '=', '-', '_', '.', ',', ';', ':', '@', '>':
+			return runes[:i], runes[i:]
+		}
+	}
+	return runes[:width], runes[width:]
 }
 
 // truncate shortens s to limit runes, keeping the result readable.

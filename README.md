@@ -68,6 +68,8 @@ usage or runtime error.
 | `-skip-path` | off | skip the sensitive-path wordlist |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
+| `-quiet` | off | one-line summary only (CI mode); implies plain output |
+| `-width` | 0 | wrap to this many columns; `0` detects the terminal |
 | `-color` | `auto` | `auto`, `always` or `never`; `auto` colors only on a terminal |
 
 Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
@@ -90,6 +92,18 @@ Color appears only when stdout is an interactive terminal. `NO_COLOR`,
 into a pipe) and `-color=never` removes it entirely. JSON output is never
 styled, and the animated status line requires a real terminal so redirected
 output never collects carriage returns.
+
+Long values wrap to the detected terminal width, with continuation lines
+aligned under the value column. Wrapping understands the content it breaks:
+a word is kept whole where possible, an unbreakable token is split at a path
+separator, an HTML tag is never cut in half, and a `URL` line is left intact
+because a split URL cannot be copied. Use `-width N` to pin the width
+(useful for reproducible reports); redirected output is never wrapped unless
+a width is given.
+
+`-quiet` prints a single line such as `4 findings · 30 requests · 3 critical,
+1 high` and nothing else — no banner, no detail, no animation — while keeping
+the exit code semantics. It is meant for CI logs.
 
 On Windows the console is switched into VT mode first; if that fails the tool
 falls back to plain text rather than printing raw escape codes.

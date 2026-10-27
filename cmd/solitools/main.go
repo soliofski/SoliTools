@@ -23,7 +23,7 @@ import (
 	"solitools/internal/term"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -71,6 +71,8 @@ Flags for scan:
   -max-params int         maximum parameters to probe (default 10)
   -skip-path              skip the sensitive-path wordlist
   -verbose                show the score derivation
+  -quiet                  print only a one-line summary (CI mode)
+  -width int              wrap output to this many columns (0 = detect)
   -json                   emit a JSON report
   -color auto|always|never
                           color output (default auto: only on a terminal)
@@ -109,6 +111,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	maxParams := flags.Int("max-params", scan.DefaultMaxParams, "maximum parameters to probe")
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
+	quiet := flags.Bool("quiet", false, "print only a one-line summary")
+	width := flags.Int("width", 0, "wrap output to this many columns (0 = detect)")
 	asJSON := flags.Bool("json", false, "emit a JSON report")
 	colorMode := flags.String("color", "auto", "color output: auto, always or never")
 
@@ -131,6 +135,14 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	theme := term.New(stdout, shade)
+	if *quiet {
+		// CI output stays plain and deterministic even on a color terminal.
+		theme = term.New(stdout, term.ModeNever)
+	}
+	if *width < 0 {
+		fmt.Fprintf(stderr, "solitools scan: -width must be zero or positive, got %d\n", *width)
+		return 2
+	}
 
 	threshold, err := resolveThreshold(flags, *minScore, *strict, *all)
 	if err != nil {
@@ -151,11 +163,11 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// JSON output must stay parseable: no banner and no live status block.
-	if !*asJSON {
+	if !*asJSON && !*quiet {
 		writeBanner(stdout, theme, target, threshold, *rate)
 	}
 	live := progress.New(stdout, theme, client)
-	if !*asJSON {
+	if !*asJSON && !*quiet {
 		live.Start()
 	}
 
@@ -177,6 +189,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		Threshold: threshold,
 		Mask:      *mask,
 		Verbose:   *verbose,
+		Quiet:     *quiet,
+		Width:     *width,
 		JSON:      *asJSON,
 		Elapsed:   time.Since(start),
 		Version:   version,

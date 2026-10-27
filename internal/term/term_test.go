@@ -43,6 +43,24 @@ func TestNeverDisablesEvenOnAlways(t *testing.T) {
 	}
 }
 
+func TestWidthUsesColumns(t *testing.T) {
+	t.Setenv("COLUMNS", "132")
+	var buf bytes.Buffer
+	if got := Width(&buf); got != 132 {
+		t.Fatalf("Width = %d, want 132", got)
+	}
+}
+
+func TestWidthRejectsUnusableColumns(t *testing.T) {
+	for _, raw := range []string{"", "abc", "0", "-5", "5000"} {
+		t.Setenv("COLUMNS", raw)
+		var buf bytes.Buffer
+		if got := Width(&buf); got != DefaultWidth {
+			t.Errorf("COLUMNS=%q: Width = %d, want %d", raw, got, DefaultWidth)
+		}
+	}
+}
+
 func TestNilThemeRendersPlain(t *testing.T) {
 	var theme *Theme
 	if theme.Enabled() {
