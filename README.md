@@ -5,6 +5,9 @@ bounty work. The guiding rule: **a finding must be worth a human's time**.
 Precision beats recall at every decision point, and everything filtered out is
 counted and explained rather than silently dropped.
 
+Architecture, maintenance notes, known traps and the design rationale live in
+[HANDOVER.md](HANDOVER.md); this file covers usage.
+
 > Use SoliTools only against systems you are authorized to test. It sends real
 > HTTP requests, including harmless canary payloads.
 
