@@ -1,6 +1,7 @@
 # Build output
 /solitools
 /solitools.exe
+/solitools.exe~
 /bin/
 /dist/
 
