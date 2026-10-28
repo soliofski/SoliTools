@@ -1,7 +1,7 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.12.0` · **Branch:** `main` · **Commits:** 23
+**Version:** `0.12.0` · **Branch:** `main` · **Commits:** 24
 **Size:** 73 Go files (45 source, 28 test), ~12,700 lines including tests, 215 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
@@ -1017,6 +1017,7 @@ reports evidence; it does not weaponise it.
 | `631c0cd` | fix(tui): stop VT input from typing "[A"/"[B" instead of navigating | clear `ENABLE_VIRTUAL_TERMINAL_INPUT`; `rawInputMode` unit test |
 | `05c6576` | feat(verify): add opt-in live credential validation | `internal/verify`, `-verify`, TUI checkbox, `live-validation` signals |
 | `90a6a39` | fix(verify): give each verifier its own HTTP client | per-verifier client; redirect-refusal test |
+| `ceeb618` | feat(waf): detect firewalls and suppress block-page false positives | `internal/waf`, probe observer, reflection/path guards, report/TUI badge |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
