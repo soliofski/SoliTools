@@ -55,21 +55,25 @@ type Verifier struct {
 // New returns a verifier with a clean, bounded HTTP client.
 func New() *Verifier {
 	return &Verifier{
-		Client:   defaultClient,
+		Client:   newHTTPClient(),
 		BaseURLs: make(map[string]string),
 		Workers:  4,
 	}
 }
 
-// defaultClient is shared by every verifier that does not bring its own. It
-// carries no target headers, which is the whole point of not reusing httpx.
-var defaultClient = &http.Client{
-	Timeout: 10 * time.Second,
-	// A redirect is not an identity answer, and following one could carry a
-	// token somewhere it was not meant to go.
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
+// defaultClient is the fallback for a zero-value Verifier. Constructed clients
+// are per-verifier, so a test that changes a timeout cannot affect another.
+var defaultClient = newHTTPClient()
+
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		// A redirect is not an identity answer, and following one could carry a
+		// token somewhere it was not meant to go.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // httpClient falls back to the default rather than panicking on a zero-value

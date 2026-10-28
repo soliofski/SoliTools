@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -290,6 +291,30 @@ func TestApplyLeavesUnsupportedRulesAlone(t *testing.T) {
 	}
 	if !Supported("secret.github-token") {
 		t.Fatal("GitHub tokens are supported")
+	}
+}
+
+// TestApplyRefusesRedirects keeps a token from travelling along a redirect
+// chain: the verifier must report the 302 and stop.
+func TestApplyRefusesRedirects(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Redirect(w, r, "/elsewhere", http.StatusFound)
+	}))
+	defer server.Close()
+
+	verifier := New()
+	verifier.BaseURLs["github"] = server.URL
+	findings := verifier.Apply(context.Background(), []finding.Finding{
+		tokenFinding("secret.github-token", "ghp_redirect"),
+	})
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("provider hits = %d, want 1; the redirect must not be followed", got)
+	}
+	if got := fieldValue(findings[0], "Validation"); got != "skipped (provider returned 302)" {
+		t.Fatalf("validation = %q, want a skipped 302", got)
 	}
 }
 
