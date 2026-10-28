@@ -37,8 +37,7 @@ func enterRawMode(in, out *os.File) (func(), error) {
 		return nil, errors.New("tui: standard output is not a console")
 	}
 
-	rawInput := inMode&^(enableLineInput|enableEchoInput|enableProcessedInput) | enableVirtualTerminalInput
-	if result, _, _ := procSetConsoleMode.Call(uintptr(inHandle), uintptr(rawInput)); result == 0 {
+	if result, _, _ := procSetConsoleMode.Call(uintptr(inHandle), uintptr(rawInputMode(inMode))); result == 0 {
 		return nil, errors.New("tui: could not switch the console to raw input")
 	}
 	if result, _, _ := procSetConsoleMode.Call(uintptr(outHandle), uintptr(outMode|enableVTProcessing)); result == 0 {
@@ -51,4 +50,17 @@ func enterRawMode(in, out *os.File) (func(), error) {
 		procSetConsoleMode.Call(uintptr(outHandle), uintptr(outMode))
 	}
 	return restore, nil
+}
+
+// rawInputMode computes the console input mode for the session.
+//
+// ENABLE_VIRTUAL_TERMINAL_INPUT is deliberately cleared. With it set, the
+// console translates arrow keys into the VT sequences ESC [ A / ESC [ B; this
+// reader consumes KEY_EVENT_RECORDs rather than a byte stream, so the ESC
+// arrives as the Esc key and the remaining "[A"/"[B" arrives as printable
+// runes — which the form then types into the focused field. Raw key records
+// already carry VK_UP/VK_DOWN, so the translation is not just unnecessary, it
+// is harmful.
+func rawInputMode(mode uint32) uint32 {
+	return mode &^ (enableLineInput | enableEchoInput | enableProcessedInput | enableVirtualTerminalInput)
 }

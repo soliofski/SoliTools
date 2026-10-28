@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.10.0` · **Branch:** `main` · **Commits:** 16
-**Size:** 67 Go files (42 source, 25 test), ~11,150 lines including tests, 190 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.10.1` · **Branch:** `main` · **Commits:** 17
+**Size:** 68 Go files (42 source, 26 test), ~11,200 lines including tests, 192 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -172,6 +172,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 | 11 | URLs get hard-wrapped | A split URL cannot be copied into a browser | `URL` rows are exempt from wrapping |
 | 12 | Soft-404 filter too loose | A 512-byte absolute tolerance treats any tiny page as the catch-all | `similarSize` is relative with a 200-byte scale floor |
 | 13 | RE2 rejects nested counted repetition | `(?:a{1,2}b){0,10}` compiles, but `(?:[a-z]{2,4}=[^&]{0,200}&){0,10}` fails with `invalid repeat count` | Flatten to one character class with a single bounded repeat, as `secret.azure-sas-token` does |
+| 14 | VT input splits arrow keys | With `ENABLE_VIRTUAL_TERMINAL_INPUT` set, Windows translates arrows to `ESC [ A/B`, and `ReadConsoleInputW` hands the trailing `[A`/`[B` back as printable runes | Keep VT input **off**; key records already carry `VK_UP`/`VK_DOWN`. Pinned by `TestRawInputModeClearsVTInput` |
 
 ---
 
@@ -706,11 +707,12 @@ tests can cover bounds, toggles, scrolling and masking without a console.
 
 Input is platform-specific behind one `keyReader` interface:
 
-- **Windows** reads `KEY_EVENT_RECORD`s with `ReadConsoleInputW`, maps virtual
-  keys (`VK_UP`…, `VK_RETURN`, `VK_ESCAPE`) plus the Unicode character, and
-  enables `ENABLE_VIRTUAL_TERMINAL_INPUT` and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
-  while disabling line input, echo and processed input so `Ctrl+C` arrives as a
-  key instead of a signal.
+- **Windows** reads `KEY_EVENT_RECORD`s with `ReadConsoleInputW` and maps virtual
+  keys (`VK_UP`…, `VK_RETURN`, `VK_ESCAPE`) plus the Unicode character. It clears
+  line input, echo, processed input and `ENABLE_VIRTUAL_TERMINAL_INPUT` so
+  `Ctrl+C` arrives as a key and arrows stay `VK_*` records instead of being
+  translated into `ESC [ A/B` bytes; only `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+  is enabled, for output.
 - **Unix** switches termios to non-canonical, no-echo, `ISIG` off and decodes VT
   sequences (`ESC[A`…, `ESC[5~`, `ESC[H`). A lone `ESC` waits five milliseconds
   for the rest of a sequence before it is treated as the Esc key.
@@ -763,7 +765,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-190 test functions. The distribution matters more than the number:
+192 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -782,7 +784,7 @@ Rules that must survive future edits:
 | `scan` (13) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist |
 | `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
-| `tui` (24) | key decoding (VT and VK), form bounds and toggles, list scrolling, masking, frame rendering |
+| `tui` (26) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
