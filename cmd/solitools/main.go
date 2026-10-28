@@ -25,7 +25,7 @@ import (
 	"solitools/internal/tui"
 )
 
-const version = "0.13.0"
+const version = "0.14.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))

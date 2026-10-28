@@ -942,6 +942,16 @@ func TestRunMinesJSONFromProbeResponse(t *testing.T) {
 	var redirectHits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+				if redirect, ok := payload["redirect"].(string); ok && redirect != "" {
+					atomic.AddInt32(&redirectHits, 1)
+					fmt.Fprintf(w, `{"redirect":%q}`, redirect)
+					return
+				}
+			}
+		}
 		if redirect := r.URL.Query().Get("redirect"); redirect != "" {
 			atomic.AddInt32(&redirectHits, 1)
 			fmt.Fprintf(w, `{"redirect":%q}`, redirect)
@@ -967,6 +977,51 @@ func TestRunMinesJSONFromProbeResponse(t *testing.T) {
 	}
 	if atomic.LoadInt32(&redirectHits) == 0 {
 		t.Fatalf("the JSON-discovered redirect parameter was never probed: %+v", result.Findings)
+	}
+}
+
+func TestRunProbesJSONBodiesOnAPIRoutes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			fmt.Fprint(w, `<html><body><script>fetch("/api/search?q=hello");</script></body></html>`)
+		case "/api/search":
+			if r.Method == http.MethodPost {
+				var payload map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("decode JSON body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"message":%q}`, fmt.Sprint(payload["q"]))
+				return
+			}
+			fmt.Fprintf(w, "<html><body><p>%s</p></body></html>", r.URL.Query().Get("q"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.JSONProbes == 0 {
+		t.Fatal("the API parameter was not probed with a JSON body")
+	}
+
+	found := false
+	for _, candidate := range result.Findings {
+		if candidate.RuleID == "reflect.json" && hasField(candidate, "Method", "POST (JSON)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no JSON reflection finding: %+v", result.Findings)
 	}
 }
 

@@ -20,6 +20,38 @@ func testClient(t *testing.T) *Client {
 	return client
 }
 
+func TestPostJSONSetsHeadersAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json; charset=utf-8" {
+			t.Errorf("content-type = %q", got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json, text/plain, */*" {
+			t.Errorf("accept = %q", got)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"q":"x"}` {
+			t.Errorf("body = %q", body)
+		}
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	response, err := client.PostJSON(context.Background(), server.URL, []byte(`{"q":"x"}`))
+	if err != nil {
+		t.Fatalf("PostJSON: %v", err)
+	}
+	if response.Status != http.StatusOK {
+		t.Fatalf("status = %d", response.Status)
+	}
+}
+
 func TestPostFormEncodesBody(t *testing.T) {
 	var (
 		gotMethod string

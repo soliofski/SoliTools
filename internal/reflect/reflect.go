@@ -123,6 +123,9 @@ type Submission struct {
 	Status    int
 	Body      string
 	Reflected map[string]bool
+	// RuleID overrides the default reflection rule, so a JSON probe and a query
+	// probe on the same URL do not collapse into one finding.
+	RuleID string
 	// JSONBody holds the first JSON response from the probe (capped at 1 MiB),
 	// so the scan can mine parameter names from an API answer even when nothing
 	// was reflected.
@@ -131,13 +134,21 @@ type Submission struct {
 
 // Submit sends every canary once and records the outcome.
 func (a *Analyzer) Submit(ctx context.Context, target Target) Submission {
+	return a.submit(ctx, target, func(payload string) (*httpx.Response, error) {
+		return a.send(ctx, target, payload)
+	})
+}
+
+// submit runs the probe with a caller-supplied request builder, which is how
+// JSON probes reuse the canary loop without a second copy of it.
+func (a *Analyzer) submit(ctx context.Context, target Target, send func(payload string) (*httpx.Response, error)) Submission {
 	submission := Submission{Target: target, Reflected: make(map[string]bool, len(Payloads()))}
 	if a == nil || a.client == nil || target.Name == "" || target.URL == "" {
 		return submission
 	}
 
 	for _, payload := range Payloads() {
-		response, err := a.send(ctx, target, payload)
+		response, err := send(payload)
 		if err != nil {
 			continue
 		}
@@ -218,7 +229,7 @@ func Analyze(submission Submission) (finding.Finding, bool) {
 	candidate := finding.Finding{
 		Kind:       finding.KindReflect,
 		Category:   "Reflected XSS",
-		RuleID:     "reflect.html",
+		RuleID:     ruleID(submission),
 		Title:      "Potential Reflected XSS",
 		URL:        submission.Target.URL,
 		Value:      payloadUsed,
@@ -226,7 +237,10 @@ func Analyze(submission Submission) (finding.Finding, bool) {
 		Confidence: builder.Build(),
 	}
 	candidate.WithField("Parameter", submission.Target.Name)
-	if isFormPost(submission.Target.Method) {
+	switch {
+	case submission.Target.Method == MethodJSON:
+		candidate.WithField("Method", MethodJSON)
+	case isFormPost(submission.Target.Method):
 		candidate.WithField("Method", http.MethodPost)
 	}
 	candidate.WithField("Reflection Point", string(point))
@@ -409,6 +423,13 @@ func (a *Analyzer) send(ctx context.Context, target Target, payload string) (*ht
 // parameter.
 func isFormPost(method string) bool {
 	return strings.EqualFold(method, http.MethodPost)
+}
+
+func ruleID(submission Submission) string {
+	if submission.RuleID != "" {
+		return submission.RuleID
+	}
+	return "reflect.html"
 }
 
 // cloneValues copies form defaults so one probe cannot leak into the next.

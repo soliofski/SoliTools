@@ -2,6 +2,23 @@ package param
 
 import "testing"
 
+func TestFromJSONFieldsKeepsPaths(t *testing.T) {
+	body := []byte(`{"filter":{"url":"/x"},"id":1}`)
+	fields := FromJSONFields(body, 3)
+	if len(fields) != 3 {
+		t.Fatalf("fields = %+v, want three (filter, filter.url, id)", fields)
+	}
+	if len(fields[0].Path) != 1 || fields[0].Path[0] != "filter" {
+		t.Fatalf("first path = %#v, want filter", fields[0].Path)
+	}
+	if len(fields[1].Path) != 2 || fields[1].Path[0] != "filter" || fields[1].Path[1] != "url" {
+		t.Fatalf("second path = %#v, want filter.url", fields[1].Path)
+	}
+	if len(fields[2].Path) != 1 || fields[2].Path[0] != "id" {
+		t.Fatalf("third path = %#v, want id", fields[2].Path)
+	}
+}
+
 func TestFromJSONExtractsInterestingKeys(t *testing.T) {
 	body := []byte(`{
 		"user": {"id": 7, "url": "/profile", "created_at": "2026-01-01"},

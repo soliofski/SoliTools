@@ -388,6 +388,16 @@ HTML-escaped copy. Detection is same-origin and limited to pages the scan
 already knows: there is no out-of-band listener, so a value that only surfaces
 in an admin panel stays invisible.
 
+**JSON APIs.** A parameter on an `/api/` route, or one mined from JSON or a
+source map, is also probed with a JSON body — `{"name":"<canary>"}`, nested at
+the mined path (`{"filter":{"url":…}}`). The request sets
+`Content-Type: application/json; charset=utf-8` and
+`Accept: application/json, text/plain, */*`. A JSON echo is classified as
+`JSON body`; an API error page rendered as HTML is scored like any HTML
+reflection. Findings carry `Method: POST (JSON)` and rule id `reflect.json`, so
+a query finding on the same URL is not collapsed into it. WAF block pages are
+ignored exactly as on GET.
+
 ### redirect — open redirects
 
 Only redirect-specific parameters are tested, with five payload styles
@@ -398,6 +408,12 @@ vulnerability. Backslashes are folded to slashes before analysis, because
 browsers do the same everywhere in a special-scheme URL: a filter that only
 blocks `//` does not hide the finding, and `//host[backslash]path` is still
 recognised even though Go's parser rejects it on its own.
+
+**JSON APIs.** Redirect-capable parameters on API or mined endpoints are also
+sent as `{"<name>":"https://example.com/solitools-redirect-check"}` with a JSON
+body. The same `Location` verification applies, findings carry
+`Method: POST (JSON)` and rule id `redirect.json`, and a WAF block page is
+ignored before the redirect is examined.
 
 ### path — sensitive paths
 
@@ -468,6 +484,9 @@ a custom file capped at 200 entries.
 - Mining is bounded: five source maps per run at 10 MiB each, JSON depth three,
   and five second-pass parameters. A map behind a CDN or in a non-standard
   format is skipped rather than guessed at.
+- JSON probing covers `/api/` routes and parameters mined from JSON or source
+  maps. Only one body shape is tried per parameter (the mined path), so a schema
+  that insists on sibling fields may reject the probe.
 
 ## Next steps
 

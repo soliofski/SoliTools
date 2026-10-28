@@ -8,6 +8,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -287,6 +288,20 @@ func (c *Client) PostForm(ctx context.Context, target string, values url.Values)
 		Method:  http.MethodPost,
 		Headers: headers,
 		Body:    strings.NewReader(values.Encode()),
+	})
+}
+
+// PostJSON submits a JSON body. It is used by the reflection and redirect
+// modules when a parameter belongs to a JSON API rather than a form.
+func (c *Client) PostJSON(ctx context.Context, target string, body []byte) (*Response, error) {
+	headers := make(http.Header, 2)
+	headers.Set("Content-Type", "application/json; charset=utf-8")
+	headers.Set("Accept", "application/json, text/plain, */*")
+	return c.Do(ctx, Request{
+		URL:     target,
+		Method:  http.MethodPost,
+		Headers: headers,
+		Body:    bytes.NewReader(body),
 	})
 }
 

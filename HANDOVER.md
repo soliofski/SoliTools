@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.13.0` · **Branch:** `main` · **Commits:** 26
-**Size:** 77 Go files (47 source, 30 test), ~13,500 lines including tests, 232 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.14.0` · **Branch:** `main` · **Commits:** 27
+**Size:** 81 Go files (49 source, 32 test), ~14,050 lines including tests, 243 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -330,7 +330,7 @@ flowchart TD
     MAPS --> ENDP["js.ExtractEndpoints"]
     ENDP --> PARAMS["param.Names + JSON keys<br/>drops utm_ and fbclid"]
     PARAMS --> PROBE["probe up to 10 parameters<br/>reflect + redirect"]
-    PROBE --> JSONP["mine JSON answers<br/>bounded second pass"]
+    PROBE --> JSONP["mine JSON + JSON body probes<br/>bounded second pass"]
     JSONP --> STORED["reflect.Stored<br/>when -stored"]
     STORED --> PATHS["pathscan<br/>default 20 or custom list"]
     PATHS --> DEDUPE["dedupe + sort by confidence"]
@@ -625,6 +625,14 @@ warning), and a 4xx re-fetch yields nothing.
 Limits: same-origin, page-bound, one observation point. There is no out-of-band
 listener, so truly blind XSS that only surfaces in an admin panel is invisible.
 
+**JSON bodies.** `SubmitJSON` reuses the canary loop with a `PostJSON` sender.
+It builds the body from the mined path (`{"filter":{"url":"<canary>"}}`) or
+falls back to a flat `{"<name>":"<canary>"}`. Analysis is the same code, so the
+2-canary rule and WAF guard apply; the difference is the rule id (`reflect.json`)
+and `Method: POST (JSON)`. A separate rule is deliberate: dedupe keys on
+rule|URL, so sharing `reflect.html` would drop one of two findings on the same
+endpoint.
+
 ### 8.5 `redirect` — verification, not reflection
 
 Only redirect-specific parameter names are probed (`IsRedirectParam`). Five
@@ -645,6 +653,12 @@ path — normalising either would make every internal redirect look external —
 a UNC-style `[backslash][backslash]server[backslash]share` path must still fail
 the host check. All of it is pinned in `TestLeavesSite`, and
 `TestProbeDetectsEachPayloadStyle` proves every payload style end to end.
+
+**JSON bodies.** `ProbeJSON` marshals each payload into `{"<name>":"<payload>"}`,
+posts it with the JSON headers, then applies the same `IsRedirect`,
+`Location` and `leavesSite` checks. A block page is skipped before the redirect
+is examined. Findings use `redirect.json` and `Method: POST (JSON)` for the same
+dedupe reason as reflection.
 
 ### 8.6 `crawl` — depth-one discovery
 
@@ -882,7 +896,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-232 test functions. The distribution matters more than the number:
+243 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -892,13 +906,13 @@ Rules that must survive future edits:
 | `cmd` (23) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist and TUI errors |
 | `form` (10) | action resolution, field classes, destructive detection |
 | `crawl` (6) | same-origin and port rules, asset/logout exclusions, normalisation, cap |
-| `httpx` (10) | POST body, redirect policy, header injection, error classes, response observer, per-request body cap |
+| `httpx` (11) | POST body, POST JSON, redirect policy, header injection, error classes, response observer, per-request body cap |
 | `js` (13) | script resolution, third-party, endpoint filtering, source map discovery and v3 parsing |
-| `param` (9) | classification, noise removal, JSON key mining and depth |
-| `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
-| `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
+| `param` (10) | classification, noise removal, JSON key mining, depth and paths |
+| `reflect` (18) | context classification, POST bodies, escaped reflection rejected, stored pass, JSON body probes |
+| `redirect` (12) | external verified, internal ignored, echo ignored, every payload style, JSON body probes |
 | `pathscan` (9) | status filter, soft-404, catch-all host, wordlist loading and cap, block-page guard |
-| `scan` (22) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining |
+| `scan` (23) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining, JSON body probing |
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (27) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering, WAF badge |
@@ -941,6 +955,9 @@ hosts.
 | A source map is only fetched same-origin, at most five per run | `TestSourceMapURLRejectsOtherOrigins`, `TestRunMinesSourceMaps` |
 | A malformed map is skipped, never fatal | `TestParseSourceMapRejectsBadInput`, `TestRunSkipsMalformedSourceMap` |
 | JSON mining stops at depth three and never recurses | `TestFromJSONRespectsDepth`, `TestRunMinesJSONFromProbeResponse` |
+| A JSON finding never collapses into a query finding on the same URL | `TestRunProbesJSONBodiesOnAPIRoutes` |
+| JSON probes obey the WAF block guard | `TestProbeJSONSuppressesWAFBlockPage` (reflect), `TestProbeJSONSuppressesWAFBlockPage` (redirect) |
+| A nested JSON candidate keeps its path | `TestProbeJSONNestsMinedPath`, `TestFromJSONFieldsKeepsPaths` |
 | The TUI refuses a non-terminal instead of writing escapes into a pipe | `TestTUIRefusesWithoutTerminal` |
 | Exit codes: 0 clean, 1 findings, 2 error | `cmd` tests |
 
@@ -990,6 +1007,7 @@ hosts.
 | done | ~~Live credential validation~~ | Shipped in 0.11.0 as `-verify`: five read-only provider identity checks, `live-validation` ±signals, skipped on transient failure. Opt-in, dedicated client, four workers. |
 | done | ~~WAF and block detection~~ | Shipped in 0.12.0: passive provider detection, interception warning after three blocks, and block-page guards in reflection and path scanning. |
 | done | ~~Parameter mining from source maps and JSON responses~~ | Shipped in 0.13.0: same-origin v3 maps (five per run, 10 MiB cap) feeding endpoints, secrets and route bindings; JSON keys mined to depth three with a bounded second probe pass. |
+| done | ~~JSON body probing~~ | Shipped in 0.14.0: `PostJSON`, canaries and redirect payloads in JSON bodies for `/api/` and mined parameters, `POST (JSON)` findings under their own rule ids, WAF guard intact. |
 | 1 | **Authenticated scanning** | A session file (cookies, headers) would unlock logged-in surface, but it changes the tool from observer to user; needs a design decision and a scope guard. |
 | 2 | **DOM XSS analysis** | The bundles are already fetched; tracing sources to sinks is a new detection model and should stay separate from the canary probe. |
 
@@ -1019,6 +1037,9 @@ reports evidence; it does not weaponise it.
 - Mining is bounded: five maps per run at 10 MiB, JSON depth three, and five
   second-pass parameters. A map behind a CDN or in a non-standard format is
   skipped rather than guessed at.
+- JSON body probing covers `/api/` routes and parameters mined from JSON or source
+  maps, with one body shape per parameter. A schema that requires sibling fields
+  may return 400/415 and is left alone rather than guessed at.
 - `-verify` covers five providers and only answers "is this key active?". It
   does not check scopes, permissions or account identity beyond the login name
   the provider returns, and a provider outage yields `skipped`, not a verdict.

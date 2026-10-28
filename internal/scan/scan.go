@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"solitools/internal/crawl"
 	"solitools/internal/errgroup"
@@ -145,6 +146,7 @@ type Stats struct {
 	Pages             int            `json:"pages"`
 	Scripts           int            `json:"scripts"`
 	SourceMaps        int            `json:"source_maps,omitempty"`
+	JSONProbes        int            `json:"json_probes,omitempty"`
 	ThirdPartyScripts int            `json:"third_party_scripts"`
 	Endpoints         int            `json:"endpoints"`
 	Parameters        int            `json:"parameters"`
@@ -227,11 +229,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		if err != nil {
 			continue
 		}
-		collected.addEndpoints(js.ExtractEndpoints(current.Body, currentBase))
+		for _, endpoint := range js.ExtractEndpoints(current.Body, currentBase) {
+			collected.addEndpoints([]string{endpoint})
+			if endpointURL, err := url.Parse(endpoint); err == nil {
+				collected.addParams(endpointURL)
+			}
+		}
 		collected.addParams(currentBase)
 		if param.LooksJSON(current.ContentType, current.Body) {
-			for _, name := range param.FromJSON(current.Body, 3) {
-				collected.addParamName(current.URL, name)
+			for _, field := range param.FromJSONFields(current.Body, 3) {
+				collected.addJSONField(current.URL, field.Path)
 			}
 		}
 
@@ -287,7 +294,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			// Endpoints discovered inside a bundle may themselves carry
 			// parameters, but only those on the script's own origin are useful.
 			if parsed, err := url.Parse(scriptURL); err == nil {
-				collected.addEndpoints(js.ExtractEndpoints(response.Body, parsed))
+				for _, endpoint := range js.ExtractEndpoints(response.Body, parsed) {
+					collected.addEndpoints([]string{endpoint})
+					if endpointURL, err := url.Parse(endpoint); err == nil {
+						collected.addParams(endpointURL)
+					}
+				}
 				collected.addParams(parsed)
 
 				if mapURL := js.SourceMapURL(response.Body, parsed, response.Header); mapURL != "" {
@@ -346,7 +358,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 						}
 						collected.addEndpoints([]string{parsedEndpoint.String()})
 						collected.addParams(parsedEndpoint)
-						collected.addParamNames(parsedEndpoint, names)
+						collected.addParamNames(parsedEndpoint, names, true)
 					}
 				}
 				return nil
@@ -385,6 +397,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	probeGroup, probeCtx := errgroup.WithContext(ctx)
 	probeGroup.SetLimit(4)
+	var jsonProbes int64
 	for _, probe := range probes {
 		probe := probe
 		probeGroup.Go(func() error {
@@ -402,8 +415,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			}
 			// A JSON API answer can name parameters the page markup never showed.
 			if submission.JSONBody != "" && !strings.EqualFold(probe.Method, http.MethodPost) {
-				for _, name := range param.FromJSON([]byte(submission.JSONBody), 3) {
-					collected.addJSONParam(probe.URL, name)
+				for _, field := range param.FromJSONFields([]byte(submission.JSONBody), 3) {
+					collected.addJSONParam(probe.URL, field.Path)
 				}
 			}
 			if redirect.IsRedirectParam(probe.Name) {
@@ -413,6 +426,24 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				})
 				if ok {
 					collected.addFinding(redirected)
+				}
+			}
+			// JSON body probing runs alongside the query probe, not instead of
+			// it: the same parameter can be read from either channel.
+			if probe.JSON && !strings.EqualFold(probe.Method, http.MethodPost) {
+				jsonSubmission := reflectAnalyzer.SubmitJSON(probeCtx, reflect.JSONTarget{
+					URL: probe.URL, Name: probe.Name, Path: probe.JSONPath, Interest: probe.Interest,
+				})
+				if candidate, ok := reflect.Analyze(jsonSubmission); ok {
+					collected.addFinding(candidate)
+				}
+				atomic.AddInt64(&jsonProbes, 1)
+				if redirect.IsRedirectParam(probe.Name) {
+					if redirected, ok := redirectAnalyzer.ProbeJSON(probeCtx, redirect.JSONTarget{
+						URL: probe.URL, Name: probe.Name,
+					}); ok {
+						collected.addFinding(redirected)
+					}
 				}
 			}
 			return nil
@@ -433,15 +464,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		for _, target := range extras {
 			target := target
 			extraGroup.Go(func() error {
-				submission := reflectAnalyzer.Submit(extraCtx, reflect.Target{
-					URL: target.URL, Name: target.Name, Interest: target.Interest,
+				submission := reflectAnalyzer.SubmitJSON(extraCtx, reflect.JSONTarget{
+					URL: target.URL, Name: target.Name, Path: target.JSONPath, Interest: target.Interest,
 				})
 				if candidate, ok := reflect.Analyze(submission); ok {
 					collected.addFinding(candidate)
 				}
+				atomic.AddInt64(&jsonProbes, 1)
 				if redirect.IsRedirectParam(target.Name) {
-					if redirected, ok := redirectAnalyzer.Probe(extraCtx, redirect.Target{
-						URL: target.URL, Name: target.Name, Interest: target.Interest,
+					if redirected, ok := redirectAnalyzer.ProbeJSON(extraCtx, redirect.JSONTarget{
+						URL: target.URL, Name: target.Name,
 					}); ok {
 						collected.addFinding(redirected)
 					}
@@ -452,6 +484,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		_ = extraGroup.Wait()
 	}
 
+	result.Stats.JSONProbes = int(atomic.LoadInt64(&jsonProbes))
 	options.Client.SetObserver(nil)
 
 	if provider, blocked := watcher.interception(); blocked {
@@ -651,6 +684,12 @@ type probeTarget struct {
 	Method string
 	// Fields carries form defaults for a POST target.
 	Fields url.Values
+	// JSON marks a target worth a JSON body probe: an /api/ endpoint, or a
+	// parameter mined from JSON or a source map.
+	JSON bool
+	// JSONPath is the mined object path, including the name, used to build a
+	// nested request body.
+	JSONPath []string
 }
 
 func (c *collector) addSecret(result secret.Result) {
@@ -740,34 +779,59 @@ func (c *collector) addParams(u *url.URL) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, name := range names {
-		c.params = append(c.params, probeTarget{URL: u.String(), Name: name, Interest: param.Classify(name)})
+		c.params = append(c.params, probeTarget{
+			URL:      u.String(),
+			Name:     name,
+			Interest: param.Classify(name),
+			JSON:     looksLikeAPI(u.Path),
+		})
 	}
 }
 
-// addParamName attaches a name mined from a fetched page (before the snapshot)
-// to the URL it was found on.
-func (c *collector) addParamName(rawURL, name string) {
+// addJSONField attaches a JSON-mined field, with the path that leads to it, to
+// the page it was found on. These are available before the parameter snapshot.
+func (c *collector) addJSONField(rawURL string, path []string) {
 	parsed, err := url.Parse(rawURL)
-	if err != nil {
+	if err != nil || len(path) == 0 {
 		return
 	}
-	c.addParamNames(parsed, []string{name})
-}
-
-// addJSONParam records a name mined from a probe response. These arrive after
-// the parameter snapshot, so they are probed in a bounded second pass rather
-// than being silently dropped.
-func (c *collector) addJSONParam(rawURL, name string) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return
-	}
+	name := path[len(path)-1]
 	interest := param.Classify(name)
 	if interest == param.Noise {
 		return
 	}
 	c.mu.Lock()
-	c.jsonParams = append(c.jsonParams, probeTarget{URL: parsed.String(), Name: name, Interest: interest})
+	c.params = append(c.params, probeTarget{
+		URL:      parsed.String(),
+		Name:     name,
+		Interest: interest,
+		JSON:     true,
+		JSONPath: path,
+	})
+	c.mu.Unlock()
+}
+
+// addJSONParam records a field mined from a probe response. These arrive after
+// the parameter snapshot, so they are probed in a bounded second pass rather
+// than being silently dropped.
+func (c *collector) addJSONParam(rawURL string, path []string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || len(path) == 0 {
+		return
+	}
+	name := path[len(path)-1]
+	interest := param.Classify(name)
+	if interest == param.Noise {
+		return
+	}
+	c.mu.Lock()
+	c.jsonParams = append(c.jsonParams, probeTarget{
+		URL:      parsed.String(),
+		Name:     name,
+		Interest: interest,
+		JSON:     true,
+		JSONPath: path,
+	})
 	c.mu.Unlock()
 }
 
@@ -800,9 +864,18 @@ func probeTargetKey(target probeTarget) string {
 	return target.Method + "|" + target.URL + "|" + target.Name
 }
 
+// looksLikeAPI decides whether a path is conventionally an API route. It is
+// deliberately narrow: a JSON body on an arbitrary page is a guess, while /api
+// is the convention the specification names.
+func looksLikeAPI(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasPrefix(lower, "/api") || strings.Contains(lower, "/api/")
+}
+
 // addParamNames attaches names that have no query string of their own — JSON
-// keys and route bindings — to an existing endpoint.
-func (c *collector) addParamNames(base *url.URL, names []string) {
+// keys and route bindings — to an existing endpoint. jsonCandidate marks a
+// target that should also be probed with a JSON body.
+func (c *collector) addParamNames(base *url.URL, names []string, jsonCandidate bool) {
 	if base == nil || len(names) == 0 {
 		return
 	}
@@ -816,7 +889,12 @@ func (c *collector) addParamNames(base *url.URL, names []string) {
 		if interest == param.Noise {
 			continue
 		}
-		targets = append(targets, probeTarget{URL: base.String(), Name: name, Interest: interest})
+		targets = append(targets, probeTarget{
+			URL:      base.String(),
+			Name:     name,
+			Interest: interest,
+			JSON:     jsonCandidate,
+		})
 	}
 	if len(targets) == 0 {
 		return
