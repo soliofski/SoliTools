@@ -21,6 +21,7 @@ import (
 	"solitools/internal/errgroup"
 	"solitools/internal/finding"
 	"solitools/internal/httpx"
+	"solitools/internal/waf"
 )
 
 // wordlist is the default set of sensitive paths, ordered by value.
@@ -195,6 +196,11 @@ func (a *Analyzer) baseline(ctx context.Context, base string) (int, int) {
 
 // evaluate decides whether one response is a reportable path.
 func evaluate(word, probeURL string, response *httpx.Response, baselineStatus, baselineSize int) (finding.Finding, bool) {
+	if waf.IsBlockPage(response) {
+		// A WAF 403 is not a reachable application path. Reporting it would
+		// turn every blocked word into a finding.
+		return finding.Finding{}, false
+	}
 	if response.Status != 200 && response.Status != 401 && response.Status != 403 {
 		return finding.Finding{}, false
 	}

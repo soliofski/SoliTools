@@ -173,6 +173,29 @@ func TestNoWrappingWithoutWidth(t *testing.T) {
 	}
 }
 
+func TestWAFBadgeAppearsInQuietAndSummary(t *testing.T) {
+	result := sampleResult()
+	result.WAF = "Cloudflare"
+	result.Warnings = append(result.Warnings,
+		"WAF Interception: Target actively blocked probes (Cloudflare). Findings may be suppressed or incomplete.")
+
+	var quiet bytes.Buffer
+	if _, err := Render(&quiet, result, Options{Threshold: 60, Mask: true, Quiet: true}); err != nil {
+		t.Fatalf("quiet render: %v", err)
+	}
+	if !strings.Contains(quiet.String(), "WAF Cloudflare (interception detected)") {
+		t.Fatalf("quiet output = %q, want the WAF badge", quiet.String())
+	}
+
+	var summary bytes.Buffer
+	if _, err := Render(&summary, result, Options{Threshold: 60, Mask: true}); err != nil {
+		t.Fatalf("text render: %v", err)
+	}
+	if !strings.Contains(summary.String(), "WAF: Cloudflare (interception detected)") {
+		t.Fatalf("summary = %q, want the WAF line", summary.String())
+	}
+}
+
 func TestQuietPrintsOneLine(t *testing.T) {
 	var buf bytes.Buffer
 	shown, err := Render(&buf, sampleResult(), Options{Threshold: 60, Mask: true, Quiet: true})

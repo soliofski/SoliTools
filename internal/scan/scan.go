@@ -28,6 +28,7 @@ import (
 	"solitools/internal/reflect"
 	"solitools/internal/secret"
 	"solitools/internal/verify"
+	"solitools/internal/waf"
 )
 
 // Defaults for Options.
@@ -90,12 +91,22 @@ type Options struct {
 	// TUI uses it for live counters; it may be called concurrently and must be
 	// cheap and safe for concurrent use.
 	Notify func(finding.Finding)
+	// OnWAF reports a detected provider as soon as it is known: at the seed for
+	// passive fronting, or when probes start getting blocked.
+	OnWAF func(provider string)
 }
 
 // reportProgress publishes a stage label if a listener is attached.
 func (o Options) reportProgress(stage string) {
 	if o.Progress != nil {
 		o.Progress(stage)
+	}
+}
+
+// reportWAF publishes a detected provider if a listener is attached.
+func (o Options) reportWAF(provider string) {
+	if o.OnWAF != nil {
+		o.OnWAF(provider)
 	}
 }
 
@@ -139,6 +150,7 @@ type Stats struct {
 // caller decides which confidence threshold to display.
 type Result struct {
 	Target   string            `json:"target"`
+	WAF      string            `json:"waf,omitempty"`
 	Findings []finding.Finding `json:"findings"`
 	Stats    Stats             `json:"stats"`
 	Warnings []string          `json:"warnings,omitempty"`
@@ -169,6 +181,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	result.Stats.Pages = 1
 	result.Target = page.URL
+
+	// A WAF can front a perfectly healthy site; record it, but do not call the
+	// page a block. Only IsBlockPage suppresses findings.
+	if provider, ok := waf.Detect(page); ok {
+		result.WAF = string(provider)
+		result.Warnings = append(result.Warnings, "Target is fronted by "+string(provider))
+		options.reportWAF(string(provider))
+	}
 
 	base, err := url.Parse(page.URL)
 	if err != nil {
@@ -277,6 +297,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	redirectAnalyzer := redirect.New(options.Client)
 	options.reportProgress("probing parameters")
 
+	// Watch probe responses for block pages. The observer is scoped to this
+	// stage: path scanning later must not count toward the probe streak.
+	watcher := &blockWatcher{}
+	options.Client.SetObserver(watcher.observe)
+
 	probeGroup, probeCtx := errgroup.WithContext(ctx)
 	probeGroup.SetLimit(4)
 	for _, probe := range probes {
@@ -307,6 +332,15 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		})
 	}
 	_ = probeGroup.Wait()
+	options.Client.SetObserver(nil)
+
+	if provider, blocked := watcher.interception(); blocked {
+		result.Warnings = append(result.Warnings, interceptionWarning(provider))
+		if result.WAF == "" {
+			result.WAF = string(provider)
+		}
+		options.reportWAF(string(provider))
+	}
 
 	// Stored reflection is a second-pass question about the same submissions:
 	// known pages are fetched again later in the run, and only canaries that

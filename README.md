@@ -115,7 +115,8 @@ interface over the same engine:
 The TUI draws on the alternate screen buffer, so the user's scrollback survives,
 and hides the cursor while it owns the terminal. It requires a real terminal on
 both stdin and stdout; with a pipe it refuses to start, leaving the plain usage
-text and exit code 2 intact. There is no mouse support.
+text and exit code 2 intact. There is no mouse support. If a WAF is detected,
+the monitor and explorer headers carry a `[WAF: Provider]` badge.
 
 ### Code scanning (SARIF)
 
@@ -281,6 +282,32 @@ Safety and cost, since this is the only feature that talks to a third party:
 - A provider name can be pointed at another origin through `verify.Verifier`,
   which is how the tests use `httptest` instead of the real APIs.
 
+### waf — firewalls and synthetic blocks
+
+Passive detection needs no extra requests: headers and block-page bodies are
+enough. Cloudflare (`cf-ray`, `cf-cache-status`, `Server: cloudflare`),
+CloudFront / AWS WAF (`x-amz-cf-id`, `x-amzn-errortype`), Akamai
+(`AkamaiGHost`, `X-Akamai-Transformed`), Imperva / Incapsula (`X-Iinfo`,
+`X-CDN: Incapsula`) and ModSecurity (`mod_security` markers) are recognised.
+A bare 429, or a 403 with no application context, is classed as a generic
+block.
+
+What the scanner does with that knowledge:
+
+- **Seed:** a provider is recorded in the result and the report notes that the
+target is fronted by it.
+- **Probing:** three consecutive block pages (or 429s) raise
+  `WAF Interception: Target actively blocked probes (Provider). Findings may be
+  suppressed or incomplete.` The witness is a per-response observer scoped to
+  the probing stage, so crawler and path requests do not distort it.
+- **False-positive guards:** a canary echoed by a WAF block page is not a
+  reflection finding, and a synthetic 403 is not a reachable path. Both rules
+  key on `IsBlockPage`, never on the mere presence of a WAF: a Cloudflare-
+  fronted application still answers normally and is still scanned normally.
+
+The classification is signature-based, so an in-house WAF with a bespoke page
+may only surface as a generic block — or not at all.
+
 ### js — script triage and endpoint extraction
 
 Scripts on the same registrable domain are fetched; analytics, tag managers and
@@ -408,6 +435,9 @@ stored by a form on one page is found on a listing page.
 - Credential scores are structural by default. `-verify` checks only GitHub,
   Slack, GitLab, OpenAI and Anthropic, only whether the credential is active,
   and not what it is allowed to do.
+- WAF detection is signature-based. An unknown or custom firewall may be
+  misclassified as a generic block, and the generic 403 heuristic deliberately
+  ignores plain "Forbidden" pages to avoid hiding real findings.
 - Reflection detection is single-shot on the page itself. With `-stored` the
   scan re-fetches known pages once, later in the run; truly blind XSS needs an
   out-of-band listener and is out of scope.

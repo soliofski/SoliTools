@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -111,6 +112,37 @@ func TestInvalidURLIsClassified(t *testing.T) {
 		if KindOf(err) != ErrInvalidURL {
 			t.Fatalf("%q: kind = %q, want %q", target, KindOf(err), ErrInvalidURL)
 		}
+	}
+}
+
+func TestObserverSeesResponsesAndCanBeCleared(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	var seen int32
+	client.SetObserver(func(*Response) { atomic.AddInt32(&seen, 1) })
+
+	for i := 0; i < 2; i++ {
+		if _, err := client.Get(context.Background(), server.URL); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&seen); got != 2 {
+		t.Fatalf("observer calls = %d, want 2", got)
+	}
+
+	client.SetObserver(nil)
+	if _, err := client.Get(context.Background(), server.URL); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := atomic.LoadInt32(&seen); got != 2 {
+		t.Fatalf("observer calls after clear = %d, want 2", got)
 	}
 }
 

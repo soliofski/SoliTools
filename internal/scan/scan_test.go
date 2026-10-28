@@ -685,6 +685,131 @@ func TestRunVerifyIsOptInAndInjectable(t *testing.T) {
 	}
 }
 
+func warningsText(result Result) string { return strings.Join(result.Warnings, " | ") }
+
+func TestRunDetectsWAFAtSeed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "cloudflare")
+		fmt.Fprint(w, "<html><body>application</body></html>")
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.WAF != "Cloudflare" {
+		t.Fatalf("WAF = %q, want Cloudflare", result.WAF)
+	}
+	if !strings.Contains(warningsText(result), "fronted by Cloudflare") {
+		t.Fatalf("warnings = %v, want the fronting note", result.Warnings)
+	}
+}
+
+// TestRunSuppressesReflectionOnWAFBlockPage is the false-positive guard: the
+// block page echoes the canary, but that echo is the WAF, not the application.
+func TestRunSuppressesReflectionOnWAFBlockPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if q != "" && q != "hello" {
+			w.Header().Set("cf-ray", "8a1b2c3d-LHR")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprintf(w, "<html><body>Attention Required! | Cloudflare %s</body></html>", q)
+			return
+		}
+		fmt.Fprint(w, "<html><body>hello</body></html>")
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/?q=hello", Client: client, SkipPath: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.Parameters == 0 {
+		t.Fatal("the q parameter was not discovered")
+	}
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindReflect {
+			t.Fatalf("a canary echoed by a WAF block page became a finding: %+v", candidate)
+		}
+	}
+	if !strings.Contains(warningsText(result), "WAF Interception") {
+		t.Fatalf("warnings = %v, want an interception warning", result.Warnings)
+	}
+}
+
+func TestRunWarnsOnConsecutiveBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("q") != "" && r.URL.Query().Get("q") != "hello" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, "<html><body>hello</body></html>")
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/?q=hello", Client: client, SkipPath: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	warning := warningsText(result)
+	if !strings.Contains(warning, "WAF Interception") || !strings.Contains(warning, "Generic Block") {
+		t.Fatalf("warnings = %v, want an interception warning naming Generic Block", result.Warnings)
+	}
+	if !strings.Contains(warning, "Findings may be suppressed or incomplete") {
+		t.Fatalf("warnings = %v, want the incompleteness note", result.Warnings)
+	}
+	if result.WAF != "Generic Block" {
+		t.Fatalf("WAF = %q, want Generic Block", result.WAF)
+	}
+}
+
+// TestRunDoesNotWarnBeforeThreeBlocks pins the threshold at three.
+func TestRunDoesNotWarnBeforeThreeBlocks(t *testing.T) {
+	var probes int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		if q != "" && q != "hello" {
+			if atomic.AddInt32(&probes, 1) <= 2 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+		}
+		fmt.Fprint(w, "<html><body>hello</body></html>")
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/?q=hello", Client: client, SkipPath: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(warningsText(result), "WAF Interception") {
+		t.Fatalf("two blocks must not trigger the interception warning: %v", result.Warnings)
+	}
+}
+
 func TestStoragePage(t *testing.T) {
 	cases := []struct {
 		name   string

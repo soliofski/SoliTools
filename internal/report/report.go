@@ -107,6 +107,9 @@ func writeQuiet(w io.Writer, result scan.Result, shown []finding.Finding) {
 	if len(result.Warnings) > 0 {
 		parts = append(parts, plural(len(result.Warnings), "warning", "warnings"))
 	}
+	if badge := wafBadge(result); badge != "" {
+		parts = append(parts, "WAF "+badge)
+	}
 	fmt.Fprintln(w, strings.Join(parts, " · "))
 }
 
@@ -209,6 +212,9 @@ func writeSummary(w io.Writer, result scan.Result, shown []finding.Finding, opts
 	if len(result.Warnings) > 0 {
 		rows = append(rows, [2]string{"Warnings", fmt.Sprintf("%d", len(result.Warnings))})
 	}
+	if badge := wafBadge(result); badge != "" {
+		rows = append(rows, [2]string{"WAF", badge})
+	}
 	writeBox(w, theme, "SoliTools", rows, width)
 
 	for _, warning := range result.Warnings {
@@ -240,6 +246,9 @@ func writePlainSummary(w io.Writer, result scan.Result, shown []finding.Finding,
 	if len(result.Warnings) > 0 {
 		lines = append(lines, fmt.Sprintf("Warnings: %d", len(result.Warnings)))
 		lines = append(lines, result.Warnings...)
+	}
+	if badge := wafBadge(result); badge != "" {
+		lines = append(lines, "WAF: "+badge)
 	}
 
 	for _, line := range lines {
@@ -371,6 +380,29 @@ func splitToken(runes []rune, width int) ([]rune, []rune) {
 		}
 	}
 	return runes[:width], runes[width:]
+}
+
+// wafBadge names the detected WAF and whether probing was actively blocked.
+// Empty means "nothing to say": no provider and no interception warning.
+func wafBadge(result scan.Result) string {
+	intercepted := false
+	for _, warning := range result.Warnings {
+		if strings.HasPrefix(warning, "WAF Interception:") {
+			intercepted = true
+			break
+		}
+	}
+	if result.WAF == "" && !intercepted {
+		return ""
+	}
+	provider := result.WAF
+	if provider == "" {
+		return "interception detected"
+	}
+	if intercepted {
+		return provider + " (interception detected)"
+	}
+	return provider
 }
 
 // trafficSummary renders the counters shared by the box and the summary.

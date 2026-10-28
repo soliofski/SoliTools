@@ -18,6 +18,7 @@ import (
 	"solitools/internal/finding"
 	"solitools/internal/httpx"
 	"solitools/internal/param"
+	"solitools/internal/waf"
 )
 
 // Context is where in the response the payload landed.
@@ -137,6 +138,11 @@ func (a *Analyzer) Submit(ctx context.Context, target Target) Submission {
 			continue
 		}
 		submission.Status = response.Status
+		if waf.IsBlockPage(response) {
+			// A block page may echo the canary; that is the WAF talking, not the
+			// application. Counting it would invent an XSS finding.
+			continue
+		}
 		text := response.BodyString()
 
 		offset := strings.Index(text, payload)

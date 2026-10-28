@@ -154,11 +154,34 @@ type Client struct {
 	maxBody  int64
 	agent    string
 	requests atomic.Int64
+
+	observerMu sync.RWMutex
+	observer   func(*Response)
 }
 
 // Requests reports how many requests this client has attempted. The scan report
 // uses it to state the real cost of a run.
 func (c *Client) Requests() int64 { return c.requests.Load() }
+
+// SetObserver installs a callback that runs for every completed response. The
+// scan uses it to count WAF block pages without threading a response return
+// value through every module. Callbacks run concurrently with the requests that
+// trigger them, so they must be cheap and safe for concurrent use. Pass nil to
+// remove the observer.
+func (c *Client) SetObserver(observer func(*Response)) {
+	c.observerMu.Lock()
+	c.observer = observer
+	c.observerMu.Unlock()
+}
+
+func (c *Client) notify(response *Response) {
+	c.observerMu.RLock()
+	observer := c.observer
+	c.observerMu.RUnlock()
+	if observer != nil {
+		observer(response)
+	}
+}
 
 // New builds a Client.
 func New(opts Options) (*Client, error) {
@@ -301,13 +324,15 @@ func (c *Client) Do(ctx context.Context, request Request) (*Response, error) {
 		body = body[:c.maxBody]
 	}
 
-	return &Response{
+	response := &Response{
 		URL:       request.URL,
 		Status:    raw.StatusCode,
 		Header:    raw.Header.Clone(),
 		Body:      body,
 		Truncated: truncated,
-	}, nil
+	}
+	c.notify(response)
+	return response, nil
 }
 
 // classify maps a transport error to a Kind without losing the original.

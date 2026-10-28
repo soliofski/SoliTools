@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.11.0` · **Branch:** `main` · **Commits:** 22
-**Size:** 70 Go files (43 source, 27 test), ~12,000 lines including tests, 203 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.12.0` · **Branch:** `main` · **Commits:** 23
+**Size:** 73 Go files (45 source, 28 test), ~12,700 lines including tests, 215 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -188,6 +188,7 @@ internal/finding   shared result type; no printing
 internal/confidence scoring model: base + signals, clamp, band
 internal/secret    credential detection
 internal/verify    read-only provider identity validation
+internal/waf       firewall and synthetic block detection
 internal/js        script triage + endpoint extraction
 internal/form      HTML form parsing, safety classification
 internal/crawl     depth-one same-origin link discovery
@@ -212,6 +213,7 @@ flowchart LR
 
     SECRET["internal/secret"]
     VERIFY["internal/verify"]
+    WAF["internal/waf"]
     JS["internal/js"]
     FORM["internal/form"]
     CRAWL["internal/crawl"]
@@ -234,6 +236,9 @@ flowchart LR
     TUI --> REPORT
     SCAN --> SECRET
     SCAN --> VERIFY
+    SCAN --> WAF
+    REFLECT --> WAF
+    PATH --> WAF
     SCAN --> JS
     SCAN --> FORM
     SCAN --> CRAWL
@@ -292,6 +297,7 @@ flowchart LR
     ├── scan/                  orchestrator + dedupe
     ├── secret/                rules, scanner, comments, context, entropy
     ├── verify/                read-only provider identity checks
+    ├── waf/                   firewall and block-page classification
     ├── term/                  palette, TTY, width/height (windows + unix)
     └── tui/                   form, live monitor, findings explorer
 ```
@@ -768,6 +774,50 @@ Safety invariants:
 band and appends the signal, so a late adjustment is as auditable as a detector
 signal.
 
+### 8.10 `waf` — firewalls and synthetic blocks
+
+The package answers two different questions, and the distinction is the whole
+design:
+
+- `Detect(response)` — which product fronts this response? A normal 200 from a
+  Cloudflare-fronted site returns `Cloudflare,true` because of `cf-ray` or
+  `Server: cloudflare`.
+- `IsBlockPage(response)` — is this response the application, or a synthetic
+  interception? A fronted 200 is not a block; a 403/429/503 (or a challenge
+  body on a 200) from a recognised provider is.
+
+Signatures are header-first, body-second: Cloudflare (`cf-ray`,
+`cf-cache-status`, `server`), CloudFront / AWS WAF (`x-amz-cf-id`,
+`x-amzn-errortype`), Akamai (`AkamaiGHost`, `X-Akamai-Transformed`), Imperva /
+Incapsula (`X-Iinfo`, `X-CDN`), ModSecurity (`server` or body markers). Bodies
+are sampled to 64 KiB. `Server` is matched against *all* header values: proxies
+and test servers can emit more than one.
+
+`Generic Block` is deliberately conservative: any 429, or a 403 whose body is
+empty or carries known block wording. A 403 that says "Forbidden" but contains
+real application markup is left alone — treating it as a WAF page would hide
+findings.
+
+Scan integration:
+
+1. **Seed** — `Detect` records `Result.WAF` and adds
+   `Target is fronted by <provider>`. This is informational: the page is still
+   scanned.
+2. **Probing** — `httpx.Client.SetObserver` (scoped to the probe stage, cleared
+   before path scanning) counts consecutive `IsBlockPage` responses. Three in a
+   row set
+   `WAF Interception: Target actively blocked probes (<provider>). Findings may be suppressed or incomplete.`
+   The observer runs concurrently; "consecutive" is completion order.
+3. **False-positive guards** — `reflect.Submit` ignores a response that is a
+   block page (a WAF echoing the canary is not XSS), and `pathscan.evaluate`
+   rejects one (a synthetic 403 is not a reachable path). Both use
+   `IsBlockPage`, never `Detect`, so a fronted site is scanned normally.
+
+Reporting: the text box, plain summary and quiet line carry a `WAF` badge with
+`(interception detected)` when probing was blocked; the TUI shows
+`[WAF: Provider]` in the monitor and explorer headers and a `WAF:` line in the
+detail panel.
+
 ---
 
 ## 9. Rendering
@@ -808,27 +858,28 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-203 test functions. The distribution matters more than the number:
+215 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
 | `secret` (22) | every rule positive, plus explicit false-positive regressions |
-| `report` (17) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet |
+| `report` (18) | masking in context, JSON purity, SARIF mapping, wrapping limits, quiet, WAF badge |
 | `term` (11) | mode precedence, palette mapping, width/height parsing |
 | `cmd` (23) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist and TUI errors |
 | `form` (10) | action resolution, field classes, destructive detection |
 | `crawl` (6) | same-origin and port rules, asset/logout exclusions, normalisation, cap |
-| `httpx` (8) | POST body, redirect policy, header injection, error classes |
+| `httpx` (9) | POST body, redirect policy, header injection, error classes, response observer |
 | `js` (6) | script resolution, third-party, endpoint filtering |
 | `param` (4) | classification, noise removal |
 | `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
 | `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
-| `pathscan` (8) | status filter, soft-404, catch-all host, wordlist loading and cap |
-| `scan` (14) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in |
+| `pathscan` (9) | status filter, soft-404, catch-all host, wordlist loading and cap, block-page guard |
+| `scan` (18) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception |
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
-| `tui` (26) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering |
+| `tui` (27) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering, WAF badge |
 | `verify` (9) | five provider shapes, active/revoked/skipped, timeout, redirect refusal, input immutability, no token in fields |
+| `waf` (4) | every provider's headers and body signatures, generic block heuristics, duplicate Server headers, block-vs-presence |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
@@ -861,6 +912,8 @@ hosts.
 | A masked TUI frame never contains the raw secret | `TestRenderResultsShowsListAndDetail` |
 | No provider is contacted without `-verify` | `TestRunVerifyIsOptInAndInjectable` |
 | A provider response never puts the token in a field | `TestApplyVerifiesSupportedProviders` (`assertNoTokenInFields`) |
+| A WAF block page never yields a reflection or path finding | `TestRunSuppressesReflectionOnWAFBlockPage`, `TestEvaluateRejectsWAFBlockPages` |
+| Interception is reported only after three consecutive blocks | `TestRunWarnsOnConsecutiveBlocks`, `TestRunDoesNotWarnBeforeThreeBlocks` |
 | The TUI refuses a non-terminal instead of writing escapes into a pipe | `TestTUIRefusesWithoutTerminal` |
 | Exit codes: 0 clean, 1 findings, 2 error | `cmd` tests |
 
@@ -908,6 +961,7 @@ hosts.
 | done | ~~Multi-page crawl~~ | Shipped in 0.9.0 as `-crawl` + `-max-pages`: depth one, exact origin, assets and destructive paths excluded, crawled pages feeding secrets, forms, parameters and stored observation. |
 | done | ~~Interactive TUI~~ | Shipped in 0.10.0: `solitools tui` (or a bare invocation on a terminal), configuration form, live monitor with cancellation, findings explorer with mask toggle and JSON/SARIF save. |
 | done | ~~Live credential validation~~ | Shipped in 0.11.0 as `-verify`: five read-only provider identity checks, `live-validation` ±signals, skipped on transient failure. Opt-in, dedicated client, four workers. |
+| done | ~~WAF and block detection~~ | Shipped in 0.12.0: passive provider detection, interception warning after three blocks, and block-page guards in reflection and path scanning. |
 | 1 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
@@ -930,6 +984,9 @@ reports evidence; it does not weaponise it.
   and its interactive layer is not covered by automated tests — the state
   models, decoders and rendered frames are, but a real console is still the
   only way to exercise raw mode end to end.
+- WAF detection is signature-based. A bespoke firewall may only appear as a
+  generic block, and the generic 403 heuristic ignores plain "Forbidden" pages
+  on purpose so genuine findings are not hidden.
 - `-verify` covers five providers and only answers "is this key active?". It
   does not check scopes, permissions or account identity beyond the login name
   the provider returns, and a provider outage yields `skipped`, not a verdict.

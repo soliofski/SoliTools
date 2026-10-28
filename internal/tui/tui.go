@@ -62,6 +62,7 @@ type app struct {
 
 	result scan.Result
 	runErr error
+	waf    string
 
 	view     *ResultView
 	notice   string
@@ -236,6 +237,7 @@ func (a *app) startScan() {
 	a.result = scan.Result{}
 	a.runErr = nil
 	a.notice = ""
+	a.waf = ""
 	a.done = make(chan scanOutcome, 1)
 
 	options := a.form.ScanOptions(client,
@@ -251,6 +253,11 @@ func (a *app) startScan() {
 		},
 	)
 	options.Target = target
+	options.OnWAF = func(provider string) {
+		a.mu.Lock()
+		a.waf = provider
+		a.mu.Unlock()
+	}
 
 	a.screen = screenScanning
 	a.spinner = 0
@@ -305,6 +312,11 @@ func (a *app) checkDone() {
 		a.done = nil
 		a.result = outcome.result
 		a.runErr = outcome.err
+		if outcome.result.WAF != "" {
+			a.mu.Lock()
+			a.waf = outcome.result.WAF
+			a.mu.Unlock()
+		}
 		a.view = NewResultView(outcome.result, a.form.ThresholdValue(), a.form.Mask)
 		a.screen = screenResults
 		if a.cancelled {
@@ -525,10 +537,26 @@ func radio(selected bool) string {
 	return "( )"
 }
 
+func (a *app) wafName() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.waf
+}
+
+// scanHeader is the title line shared by the monitor, with a WAF badge once a
+// provider is known.
+func (a *app) scanHeader(stage string) string {
+	header := a.title("SoliTools "+a.cfg.Version) + a.dim(" — "+stage)
+	if name := a.wafName(); name != "" {
+		header += "   " + a.cfg.Theme.Color("warning", "[WAF: "+name+"]")
+	}
+	return header
+}
+
 func (a *app) renderScanning(frame *strings.Builder) {
 	spin := []string{"|", "/", "-", "\\"}[a.spinner%4]
 
-	a.line(frame, a.title("SoliTools "+a.cfg.Version)+a.dim(" — scanning"))
+	a.line(frame, a.scanHeader("scanning"))
 	a.blank(frame)
 	a.line(frame, "Target: "+a.form.Target)
 	a.blank(frame)
@@ -563,8 +591,12 @@ func (a *app) renderResults(frame *strings.Builder) {
 		a.line(frame, "No results.")
 		return
 	}
-	a.line(frame, fmt.Sprintf("%s %s", a.title("SoliTools "+a.cfg.Version),
-		a.dim(fmt.Sprintf("— findings %d/%d at threshold %.0f", a.view.Len(), len(a.result.Findings), a.view.Threshold))))
+	header := fmt.Sprintf("%s %s", a.title("SoliTools "+a.cfg.Version),
+		a.dim(fmt.Sprintf("— findings %d/%d at threshold %.0f", a.view.Len(), len(a.result.Findings), a.view.Threshold)))
+	if name := a.wafName(); name != "" {
+		header += "   " + a.cfg.Theme.Color("warning", "[WAF: "+name+"]")
+	}
+	a.line(frame, header)
 	a.blank(frame)
 
 	height := a.listHeight()
@@ -612,6 +644,9 @@ func (a *app) renderDetail(frame *strings.Builder) {
 		return
 	}
 	a.line(frame, fmt.Sprintf("%s %s", selected.Title, a.dim("— "+string(selected.Kind))))
+	if name := a.wafName(); name != "" {
+		a.line(frame, "WAF: "+name)
+	}
 	a.line(frame, "URL: "+selected.URL)
 	if parameter := fieldValue(selected, "Parameter"); parameter != "" {
 		method := fieldValue(selected, "Method")

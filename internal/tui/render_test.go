@@ -100,6 +100,37 @@ func TestRenderScanningShowsMetrics(t *testing.T) {
 	}
 }
 
+func TestRenderWAFBadges(t *testing.T) {
+	instance := &app{
+		cfg:     Config{Version: "test"},
+		form:    NewForm(),
+		screen:  screenScanning,
+		stage:   "probing parameters",
+		bands:   map[string]int{},
+		started: time.Now(),
+		waf:     "Cloudflare",
+	}
+	frame := renderToFile(t, instance)
+	if !strings.Contains(frame, "[WAF: Cloudflare]") {
+		t.Fatalf("the monitor is missing the WAF badge:\n%s", frame)
+	}
+
+	result := scan.Result{
+		WAF:      "Cloudflare",
+		Findings: []finding.Finding{testFinding("secret.github-token", finding.KindSecret, 95, "ghp_waf")},
+	}
+	instance.screen = screenResults
+	instance.result = result
+	instance.view = NewResultView(result, 60, true)
+	frame = renderToFile(t, instance)
+	if !strings.Contains(frame, "[WAF: Cloudflare]") {
+		t.Fatalf("the explorer header is missing the WAF badge:\n%s", frame)
+	}
+	if !strings.Contains(frame, "WAF: Cloudflare") {
+		t.Fatalf("the detail panel is missing the WAF line:\n%s", frame)
+	}
+}
+
 func TestRenderResultsShowsListAndDetail(t *testing.T) {
 	secretValue := "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 	result := scan.Result{Findings: []finding.Finding{

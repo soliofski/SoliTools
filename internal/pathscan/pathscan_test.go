@@ -9,6 +9,21 @@ import (
 	"solitools/internal/httpx"
 )
 
+// TestEvaluateRejectsWAFBlockPages is the path-side false-positive guard: a
+// synthetic block is not an exposed file.
+func TestEvaluateRejectsWAFBlockPages(t *testing.T) {
+	header := http.Header{}
+	header.Set("cf-ray", "8a1b2c3d-LHR")
+	response := &httpx.Response{
+		Status: http.StatusForbidden,
+		Header: header,
+		Body:   []byte("<html><title>Attention Required! | Cloudflare</title></html>"),
+	}
+	if _, ok := evaluate(".env", "https://target.test/.env", response, http.StatusNotFound, 0); ok {
+		t.Fatal("a WAF block page must not be reported as a reachable path")
+	}
+}
+
 func TestEvaluate(t *testing.T) {
 	response := func(status int, body string) *httpx.Response {
 		return &httpx.Response{Status: status, Body: []byte(body)}
