@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go:
+          - 1.21.x
+          - 1.22.x
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -v -race ./...
+
+      - name: Build for linux/amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: go build ./...
+
+      - name: Build for darwin/arm64
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+        run: go build ./...
+
+      - name: Build for windows/amd64
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./...

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"solitools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/finding"
 )
 
 // redirectServer answers a JSON POST by redirecting to the submitted value when

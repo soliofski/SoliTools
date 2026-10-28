@@ -1,15 +1,10 @@
-# SoliTools — Handover for the next agent
+# SoliTools Architecture & Internal Specifications
 
-**Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.14.0` · **Branch:** `main` · **Commits:** 28
-**Size:** 81 Go files (49 source, 32 test), ~14,050 lines including tests, 243 test functions, 21 secret rules, zero external dependencies.
-**Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
+**Version:** `0.14.0` · **Design Philosophy:** Precision beats recall.
+This document outlines the internal architecture, detection algorithms, module interactions, and design rationale for SoliTools.
 
-Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
-
-This document is written so you can pick up cold: what exists, why it is built
-this way, what will bite you, and what to do next. Read §3 (the traps) before
-changing anything — it will save you hours.
+It covers what exists, why it is built this way, which traps will cost you time,
+and what comes next. Read §3 (the traps) before changing anything.
 
 ---
 
@@ -87,7 +82,6 @@ detection, or gates: some failures only appear for certain random keys.
 ### 2.3 Git
 
 - Repo-local identity: `Soliofski <Soliofski@users.noreply.github.com>`.
-- **No remote is configured.** Nothing has been pushed.
 - Commit style: `feat: …`, `feat(ui): …`, with a body explaining *why*.
 - The tree must stay clean; `.gitignore` already excludes `solitools.exe`.
 
@@ -134,7 +128,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 
 ```json
 {
-  "version": "0.9.0",
+  "version": "0.14.0",
   "target": "https://target.example/?q=1",
   "threshold": 60,
   "findings": [
@@ -274,8 +268,9 @@ flowchart LR
 ```
 .
 ├── README.md                  product docs, rule table, limitations
-├── HANDOVER.md                this document
-├── go.mod                     module solitools, go 1.21
+├── docs/ARCHITECTURE.md       this document
+├── LICENSE                    MIT
+├── go.mod                     module github.com/soliofski/SoliTools, go 1.21
 ├── .gitignore                 /solitools, /solitools.exe, editor noise
 ├── cmd/solitools/
 │   ├── main.go                flags, banner, wiring, exit codes
@@ -1104,7 +1099,7 @@ threshold inside the scanner.
    a truncation warning. A larger cap is a product change, not a tuning knob.
 6. **Generic rules.** They live in the default set and rely on score arithmetic
    to stay quiet. A `-generic` switch would be more explicit — but one more flag.
-7. **Versioning.** `0.9.0` exists only in code; there are no tags and no remote.
+7. **Versioning.** The version lives only in code; there are no tags yet.
    Tag releases if this is going to be distributed.
 8. **No CI.** Verification is local. A workflow would need the same three
    commands plus the GOCACHE reminder.

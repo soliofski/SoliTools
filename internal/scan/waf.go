@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sync"
 
-	"solitools/internal/httpx"
-	"solitools/internal/waf"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/waf"
 )
 
 // blockWatcher counts consecutive blocked probe responses.

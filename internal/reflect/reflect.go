@@ -14,11 +14,11 @@ import (
 	"net/url"
 	"strings"
 
-	"solitools/internal/confidence"
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/param"
-	"solitools/internal/waf"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/param"
+	"github.com/soliofski/SoliTools/internal/waf"
 )
 
 // Context is where in the response the payload landed.

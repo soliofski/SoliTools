@@ -12,9 +12,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/scan"
 )
 
 // Numeric bounds. They are deliberately narrow: the TUI is for a focused scan,

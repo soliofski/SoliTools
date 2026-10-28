@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"solitools/internal/finding"
-	"solitools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/scan"
 )
 
 // SARIF 2.1.0 object model, limited to what SoliTools emits.

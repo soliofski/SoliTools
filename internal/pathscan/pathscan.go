@@ -17,11 +17,11 @@ import (
 	"strings"
 	"sync"
 
-	"solitools/internal/confidence"
-	"solitools/internal/errgroup"
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/waf"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/errgroup"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/waf"
 )
 
 // wordlist is the default set of sensitive paths, ordered by value.

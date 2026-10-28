@@ -14,7 +14,7 @@ package waf
 import (
 	"strings"
 
-	"solitools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/httpx"
 )
 
 // Provider names a known product. The zero value means "none detected".

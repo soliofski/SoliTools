@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"solitools/internal/confidence"
-	"solitools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/finding"
 )
 
 func tokenFinding(rule, token string) finding.Finding {

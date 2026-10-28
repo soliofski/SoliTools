@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"solitools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/httpx"
 )
 
 func response(status int, headers map[string]string, body string) *httpx.Response {

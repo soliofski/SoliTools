@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	"solitools/internal/confidence"
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/waf"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/waf"
 )
 
 // MethodJSON labels a redirect that was requested with a JSON body, so a report

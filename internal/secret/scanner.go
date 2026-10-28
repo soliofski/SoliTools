@@ -7,8 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"solitools/internal/confidence"
-	"solitools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/finding"
 )
 
 // MaxBody bounds how much of one document is scanned.

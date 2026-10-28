@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"solitools/internal/confidence"
-	"solitools/internal/finding"
-	"solitools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/scan"
 )
 
 func testFinding(rule string, kind finding.Kind, score float64, value string) finding.Finding {

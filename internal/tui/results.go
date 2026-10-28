@@ -3,9 +3,9 @@ package tui
 import (
 	"strings"
 
-	"solitools/internal/finding"
-	"solitools/internal/scan"
-	"solitools/internal/secret"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/secret"
 )
 
 // ResultView is the findings explorer's state: the threshold-filtered list, the

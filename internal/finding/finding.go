@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"solitools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/confidence"
 )
 
 // Kind is the module that produced a finding. It is the first column of the

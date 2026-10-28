@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"solitools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/confidence"
 )
 
 // Rule describes one credential detector.

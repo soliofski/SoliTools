@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"solitools/internal/httpx"
-	"solitools/internal/param"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/param"
 )
 
 func newTestClient(t *testing.T) *httpx.Client {

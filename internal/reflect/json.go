@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/param"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/param"
 )
 
 // MethodJSON is the field value that tells a report, and a reader, that the

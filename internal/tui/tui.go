@@ -10,11 +10,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/report"
-	"solitools/internal/scan"
-	"solitools/internal/term"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/report"
+	"github.com/soliofski/SoliTools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/term"
 )
 
 // Config wires the TUI to a terminal. In and Out must be real console handles:

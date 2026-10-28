@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/verify"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/verify"
 )
 
 // testToken is assembled from two literals so this source file never looks like

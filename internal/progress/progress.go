@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"solitools/internal/httpx"
-	"solitools/internal/term"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/term"
 )
 
 // spinner frames, in braille so the movement is smooth in any monospace font.

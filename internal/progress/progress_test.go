@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"solitools/internal/term"
+	"github.com/soliofski/SoliTools/internal/term"
 )
 
 func TestRenderDrawsStatusLine(t *testing.T) {

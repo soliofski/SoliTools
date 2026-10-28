@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"solitools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/httpx"
 )
 
 func TestNewFormDefaults(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"solitools/internal/finding"
-	"solitools/internal/httpx"
-	"solitools/internal/param"
+	"github.com/soliofski/SoliTools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/param"
 )
 
 func TestClassify(t *testing.T) {

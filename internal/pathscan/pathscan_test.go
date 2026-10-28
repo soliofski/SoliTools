@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"solitools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/httpx"
 )
 
 // TestEvaluateRejectsWAFBlockPages is the path-side false-positive guard: a

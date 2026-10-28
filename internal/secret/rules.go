@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"solitools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/confidence"
 )
 
 // Rules returns the full detector set.

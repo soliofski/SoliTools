@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"solitools/internal/confidence"
-	"solitools/internal/errgroup"
-	"solitools/internal/finding"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/errgroup"
+	"github.com/soliofski/SoliTools/internal/finding"
 )
 
 // Default provider origins. Tests override an entry in Verifier.BaseURLs with

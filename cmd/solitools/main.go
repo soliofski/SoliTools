@@ -15,14 +15,14 @@ import (
 	"strings"
 	"time"
 
-	"solitools/internal/confidence"
-	"solitools/internal/httpx"
-	"solitools/internal/pathscan"
-	"solitools/internal/progress"
-	"solitools/internal/report"
-	"solitools/internal/scan"
-	"solitools/internal/term"
-	"solitools/internal/tui"
+	"github.com/soliofski/SoliTools/internal/confidence"
+	"github.com/soliofski/SoliTools/internal/httpx"
+	"github.com/soliofski/SoliTools/internal/pathscan"
+	"github.com/soliofski/SoliTools/internal/progress"
+	"github.com/soliofski/SoliTools/internal/report"
+	"github.com/soliofski/SoliTools/internal/scan"
+	"github.com/soliofski/SoliTools/internal/term"
+	"github.com/soliofski/SoliTools/internal/tui"
 )
 
 const version = "0.14.0"
