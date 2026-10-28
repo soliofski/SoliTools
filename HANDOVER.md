@@ -1,7 +1,7 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.14.0` · **Branch:** `main` · **Commits:** 27
+**Version:** `0.14.0` · **Branch:** `main` · **Commits:** 28
 **Size:** 81 Go files (49 source, 32 test), ~14,050 lines including tests, 243 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
@@ -1072,6 +1072,7 @@ reports evidence; it does not weaponise it.
 | `90a6a39` | fix(verify): give each verifier its own HTTP client | per-verifier client; redirect-refusal test |
 | `ceeb618` | feat(waf): detect firewalls and suppress block-page false positives | `internal/waf`, probe observer, reflection/path guards, report/TUI badge |
 | `fb75238` | feat(mining): widen surface with source maps and JSON responses | `js.SourceMapURL`/`ParseSourceMap`, `param.FromJSON`, 10 MiB map cap, second probe pass |
+| `65a064f` | feat(json): probe API parameters with JSON request bodies | `PostJSON`, `SubmitJSON`/`ProbeJSON`, `reflect.json`/`redirect.json`, `JSONProbes` |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
