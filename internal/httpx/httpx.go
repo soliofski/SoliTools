@@ -75,6 +75,9 @@ type Request struct {
 	Method  string
 	Headers http.Header
 	Body    io.Reader
+	// MaxBody overrides the client's body cap for this request. Zero uses the
+	// client default; source maps are the only caller that needs more.
+	MaxBody int64
 }
 
 // Response is a fully read response.
@@ -174,6 +177,13 @@ func (c *Client) SetObserver(observer func(*Response)) {
 	c.observerMu.Unlock()
 }
 
+func (c *Client) limitFor(request Request) int64 {
+	if request.MaxBody > 0 {
+		return request.MaxBody
+	}
+	return c.maxBody
+}
+
 func (c *Client) notify(response *Response) {
 	c.observerMu.RLock()
 	observer := c.observer
@@ -235,6 +245,12 @@ func New(opts Options) (*Client, error) {
 // Get issues a single GET without following redirects.
 func (c *Client) Get(ctx context.Context, target string) (*Response, error) {
 	return c.Do(ctx, Request{URL: target, Method: http.MethodGet})
+}
+
+// GetLimited is Get with a per-request body cap, for artefacts that are larger
+// than a page but still bounded (source maps).
+func (c *Client) GetLimited(ctx context.Context, target string, maxBody int64) (*Response, error) {
+	return c.Do(ctx, Request{URL: target, Method: http.MethodGet, MaxBody: maxBody})
 }
 
 // Fetch issues a GET and follows up to five redirects manually, so each hop is
@@ -315,13 +331,14 @@ func (c *Client) Do(ctx context.Context, request Request) (*Response, error) {
 	}
 	defer raw.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(raw.Body, c.maxBody+1))
+	body, err := io.ReadAll(io.LimitReader(raw.Body, c.limitFor(request)+1))
 	if err != nil {
 		return nil, classify(request.URL, err)
 	}
-	truncated := int64(len(body)) > c.maxBody
+	limit := c.limitFor(request)
+	truncated := int64(len(body)) > limit
 	if truncated {
-		body = body[:c.maxBody]
+		body = body[:limit]
 	}
 
 	response := &Response{

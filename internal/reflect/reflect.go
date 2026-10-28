@@ -123,6 +123,10 @@ type Submission struct {
 	Status    int
 	Body      string
 	Reflected map[string]bool
+	// JSONBody holds the first JSON response from the probe (capped at 1 MiB),
+	// so the scan can mine parameter names from an API answer even when nothing
+	// was reflected.
+	JSONBody string
 }
 
 // Submit sends every canary once and records the outcome.
@@ -144,6 +148,9 @@ func (a *Analyzer) Submit(ctx context.Context, target Target) Submission {
 			continue
 		}
 		text := response.BodyString()
+		if submission.JSONBody == "" && param.LooksJSON(response.ContentType(), response.Body) && len(text) <= 1<<20 {
+			submission.JSONBody = text
+		}
 
 		offset := strings.Index(text, payload)
 		if offset < 0 {

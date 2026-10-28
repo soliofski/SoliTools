@@ -42,6 +42,13 @@ const (
 	DefaultMaxStoredPages = 5
 	// DefaultMaxPages caps a crawl, seed page included.
 	DefaultMaxPages = 10
+	// maxSourceMapBytes bounds one source map. Maps are bigger than pages, but
+	// still bounded: five of them at 10 MiB is the worst case per run.
+	maxSourceMapBytes = 10 << 20
+	// maxJSONParams bounds the second probe pass for names mined from JSON
+	// responses. Without a cap, an API that echoes its schema could steer the
+	// scan indefinitely.
+	maxJSONParams = 5
 )
 
 // Options configures a scan.
@@ -137,6 +144,7 @@ type Stats struct {
 	Requests          int            `json:"requests"`
 	Pages             int            `json:"pages"`
 	Scripts           int            `json:"scripts"`
+	SourceMaps        int            `json:"source_maps,omitempty"`
 	ThirdPartyScripts int            `json:"third_party_scripts"`
 	Endpoints         int            `json:"endpoints"`
 	Parameters        int            `json:"parameters"`
@@ -195,7 +203,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return result, fmt.Errorf("scan: %w", err)
 	}
 
-	fetched := []fetchedPage{{URL: page.URL, Body: page.Body}}
+	fetched := []fetchedPage{{URL: page.URL, Body: page.Body, ContentType: page.ContentType()}}
 	if options.EnableCrawl {
 		options.reportProgress("crawling links")
 		fetched = append(fetched, crawlPages(ctx, options, base, fetched[0], options.MaxPages-1)...)
@@ -221,6 +229,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		collected.addEndpoints(js.ExtractEndpoints(current.Body, currentBase))
 		collected.addParams(currentBase)
+		if param.LooksJSON(current.ContentType, current.Body) {
+			for _, name := range param.FromJSON(current.Body, 3) {
+				collected.addParamName(current.URL, name)
+			}
+		}
 
 		for _, scriptURL := range js.ScriptURLs(current.Body, currentBase) {
 			parsed, err := url.Parse(scriptURL)
@@ -251,6 +264,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	result.Stats.Scripts = len(firstParty)
 
+	// Source maps named by first-party scripts are a second, richer source of
+	// endpoints and of code that never shipped minified.
+	var (
+		mapMu      sync.Mutex
+		seenMaps   = make(map[string]struct{}, 4)
+		sourceMaps = make([]sourceMapRef, 0, 4)
+	)
+
 	options.reportProgress("analysing scripts")
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(4)
@@ -268,11 +289,71 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			if parsed, err := url.Parse(scriptURL); err == nil {
 				collected.addEndpoints(js.ExtractEndpoints(response.Body, parsed))
 				collected.addParams(parsed)
+
+				if mapURL := js.SourceMapURL(response.Body, parsed, response.Header); mapURL != "" {
+					mapMu.Lock()
+					if _, duplicate := seenMaps[mapURL]; !duplicate && len(sourceMaps) < 5 {
+						seenMaps[mapURL] = struct{}{}
+						sourceMaps = append(sourceMaps, sourceMapRef{URL: mapURL, Script: parsed})
+					}
+					mapMu.Unlock()
+				}
 			}
 			return nil
 		})
 	}
 	_ = group.Wait()
+
+	// Source maps are fetched with the same client, at most five, four at a
+	// time, and a 10 MiB ceiling per map. A malformed or truncated map is
+	// simply skipped: it is extra surface, not a reason to fail a scan.
+	if len(sourceMaps) > 0 {
+		options.reportProgress("analysing source maps")
+		mapGroup, mapCtx := errgroup.WithContext(ctx)
+		mapGroup.SetLimit(4)
+		var statsMu sync.Mutex
+		for _, ref := range sourceMaps {
+			ref := ref
+			mapGroup.Go(func() error {
+				response, err := options.Client.GetLimited(mapCtx, ref.URL, maxSourceMapBytes)
+				if err != nil || response.Status != http.StatusOK {
+					return nil
+				}
+				parsed, err := js.ParseSourceMap(response.Body)
+				if err != nil {
+					return nil
+				}
+				statsMu.Lock()
+				result.Stats.SourceMaps++
+				statsMu.Unlock()
+
+				for index, content := range parsed.SourcesContent {
+					if strings.TrimSpace(content) == "" {
+						continue
+					}
+					source := ref.URL
+					if index < len(parsed.Sources) && parsed.Sources[index] != "" {
+						source += "#" + parsed.Sources[index]
+					}
+					body := []byte(content)
+					collected.addSecret(scanner.Scan(secret.Document{Source: source, Body: body}))
+
+					for _, endpoint := range js.ExtractEndpoints(body, ref.Script) {
+						concrete, names := js.EndpointParameters(endpoint)
+						parsedEndpoint, err := url.Parse(concrete)
+						if err != nil {
+							continue
+						}
+						collected.addEndpoints([]string{parsedEndpoint.String()})
+						collected.addParams(parsedEndpoint)
+						collected.addParamNames(parsedEndpoint, names)
+					}
+				}
+				return nil
+			})
+		}
+		_ = mapGroup.Wait()
+	}
 
 	collected.addParams(target)
 	result.Stats.Forms = usedForms
@@ -319,6 +400,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			if options.EnableStored && submission.Status != 0 {
 				collected.addSubmission(storagePage(probe.URL, probe.Name, probe.Method), submission)
 			}
+			// A JSON API answer can name parameters the page markup never showed.
+			if submission.JSONBody != "" && !strings.EqualFold(probe.Method, http.MethodPost) {
+				for _, name := range param.FromJSON([]byte(submission.JSONBody), 3) {
+					collected.addJSONParam(probe.URL, name)
+				}
+			}
 			if redirect.IsRedirectParam(probe.Name) {
 				redirected, ok := redirectAnalyzer.Probe(probeCtx, redirect.Target{
 					URL: probe.URL, Name: probe.Name, Interest: probe.Interest,
@@ -332,6 +419,39 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		})
 	}
 	_ = probeGroup.Wait()
+
+	// Names mined from JSON probe responses were not in the snapshot, so they
+	// get one bounded second pass. No further mining runs here: one level of
+	// discovery, never a loop.
+	probed := make(map[string]struct{}, len(probes))
+	for _, probe := range probes {
+		probed[probeTargetKey(probe)] = struct{}{}
+	}
+	if extras := collected.takeJSONTargets(maxJSONParams, probed); len(extras) > 0 {
+		extraGroup, extraCtx := errgroup.WithContext(ctx)
+		extraGroup.SetLimit(4)
+		for _, target := range extras {
+			target := target
+			extraGroup.Go(func() error {
+				submission := reflectAnalyzer.Submit(extraCtx, reflect.Target{
+					URL: target.URL, Name: target.Name, Interest: target.Interest,
+				})
+				if candidate, ok := reflect.Analyze(submission); ok {
+					collected.addFinding(candidate)
+				}
+				if redirect.IsRedirectParam(target.Name) {
+					if redirected, ok := redirectAnalyzer.Probe(extraCtx, redirect.Target{
+						URL: target.URL, Name: target.Name, Interest: target.Interest,
+					}); ok {
+						collected.addFinding(redirected)
+					}
+				}
+				return nil
+			})
+		}
+		_ = extraGroup.Wait()
+	}
+
 	options.Client.SetObserver(nil)
 
 	if provider, blocked := watcher.interception(); blocked {
@@ -440,8 +560,15 @@ func IsRedirectParam(name string) bool { return redirect.IsRedirectParam(name) }
 
 // fetchedPage is one page the pipeline analyses: the seed or a crawled link.
 type fetchedPage struct {
-	URL  string
-	Body []byte
+	URL         string
+	Body        []byte
+	ContentType string
+}
+
+// sourceMapRef is a discovered same-origin map and the script that named it.
+type sourceMapRef struct {
+	URL    string
+	Script *url.URL
 }
 
 // crawlPages fetches the depth-one links of the seed, four at a time, and
@@ -469,7 +596,7 @@ func crawlPages(ctx context.Context, options Options, base *url.URL, seed fetche
 				return nil
 			}
 			mu.Lock()
-			pages = append(pages, fetchedPage{URL: link, Body: response.Body})
+			pages = append(pages, fetchedPage{URL: link, Body: response.Body, ContentType: response.ContentType()})
 			mu.Unlock()
 			return nil
 		})
@@ -508,10 +635,11 @@ type collector struct {
 	params    []probeTarget
 	// stored maps a page to the submissions whose values could have been
 	// persisted there; the stored pass re-fetches each page once.
-	stored   map[string][]reflect.Submission
-	notify   func(finding.Finding)
-	gated    int
-	byReason map[string]int
+	stored     map[string][]reflect.Submission
+	jsonParams []probeTarget
+	notify     func(finding.Finding)
+	gated      int
+	byReason   map[string]int
 }
 
 // probeTarget is one parameter to probe, with the page that carries it.
@@ -614,6 +742,88 @@ func (c *collector) addParams(u *url.URL) {
 	for _, name := range names {
 		c.params = append(c.params, probeTarget{URL: u.String(), Name: name, Interest: param.Classify(name)})
 	}
+}
+
+// addParamName attaches a name mined from a fetched page (before the snapshot)
+// to the URL it was found on.
+func (c *collector) addParamName(rawURL, name string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+	c.addParamNames(parsed, []string{name})
+}
+
+// addJSONParam records a name mined from a probe response. These arrive after
+// the parameter snapshot, so they are probed in a bounded second pass rather
+// than being silently dropped.
+func (c *collector) addJSONParam(rawURL, name string) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return
+	}
+	interest := param.Classify(name)
+	if interest == param.Noise {
+		return
+	}
+	c.mu.Lock()
+	c.jsonParams = append(c.jsonParams, probeTarget{URL: parsed.String(), Name: name, Interest: interest})
+	c.mu.Unlock()
+}
+
+// takeJSONTargets deduplicates and caps the second-pass targets, skipping any
+// name already probed on that URL.
+func (c *collector) takeJSONTargets(limit int, already map[string]struct{}) []probeTarget {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	seen := make(map[string]struct{}, len(c.jsonParams))
+	targets := make([]probeTarget, 0, len(c.jsonParams))
+	for _, target := range c.jsonParams {
+		key := probeTargetKey(target)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		if _, done := already[key]; done {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, target)
+		if limit > 0 && len(targets) >= limit {
+			break
+		}
+	}
+	return targets
+}
+
+func probeTargetKey(target probeTarget) string {
+	return target.Method + "|" + target.URL + "|" + target.Name
+}
+
+// addParamNames attaches names that have no query string of their own — JSON
+// keys and route bindings — to an existing endpoint.
+func (c *collector) addParamNames(base *url.URL, names []string) {
+	if base == nil || len(names) == 0 {
+		return
+	}
+	targets := make([]probeTarget, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		interest := param.Classify(name)
+		if interest == param.Noise {
+			continue
+		}
+		targets = append(targets, probeTarget{URL: base.String(), Name: name, Interest: interest})
+	}
+	if len(targets) == 0 {
+		return
+	}
+	c.mu.Lock()
+	c.params = append(c.params, targets...)
+	c.mu.Unlock()
 }
 
 func (c *collector) snapshot() ([]string, []probeTarget) {

@@ -316,11 +316,28 @@ extracted from quoted literals and absolute URLs, then filtered: asset
 extensions, template placeholders (`${…}`, `{{…}}`, `%s`), third-party hosts and
 empty paths are dropped, and the rest is normalized and deduplicated.
 
+**Source maps.** A first-party bundle is checked for a trailing
+`//# sourceMappingURL` / `/*# sourceMappingURL */` comment and for `SourceMap`
+or `X-SourceMap` headers. The map must be same-origin — a CDN map is someone
+else's code — and at most five are fetched per run, four at a time, with a
+10 MiB cap each. `sourcesContent` is then treated as source: endpoints are
+extracted, secrets are scanned with the normal rules, and route bindings are
+made concrete (`/users/:id` becomes `/users/1`, with `id` added to the probe
+pool). This is often where the unminified API surface lives.
+
 ### param — parameter classification
 
 Curated lists, not heuristics: `high` covers redirect/file/template sinks,
 `medium` covers identifiers and content, `noise` covers `utm_*`, `fbclid`,
 `gclid` and friends, which are never probed.
+
+**JSON mining.** A page, crawled API response or probe answer that is JSON (by
+`Content-Type`, or a body starting with `{`/`[`) is walked up to three levels
+deep. Only keys classified high or medium — `redirect`, `next`, `callback`,
+`path`, `id`, … — join the parameter pool; low-interest fields and tracking
+noise do not. Names found in a probe response arrive after the parameter
+snapshot, so they are probed in one bounded second pass (five targets) and are
+never recursed.
 
 ### form — parameters that never appear in a URL
 
@@ -448,7 +465,11 @@ a custom file capped at 200 entries.
 - Crawling is depth one, opt-in and capped at 10 pages including the seed.
 - Third-party detection uses a small public-suffix table, not the full PSL.
 - Low-entropy real tokens are rejected by design; precision beats recall.
+- Mining is bounded: five source maps per run at 10 MiB each, JSON depth three,
+  and five second-pass parameters. A map behind a CDN or in a non-standard
+  format is skipped rather than guessed at.
 
 ## Next steps
 
-1. Parameter mining from source maps and JSON responses.
+1. Authenticated scanning from a session file (cookies beyond `-cookie`).
+2. DOM XSS analysis of the bundles already fetched.

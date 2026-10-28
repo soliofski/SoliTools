@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -807,6 +808,165 @@ func TestRunDoesNotWarnBeforeThreeBlocks(t *testing.T) {
 	}
 	if strings.Contains(warningsText(result), "WAF Interception") {
 		t.Fatalf("two blocks must not trigger the interception warning: %v", result.Warnings)
+	}
+}
+
+func TestRunMinesSourceMaps(t *testing.T) {
+	token := "ghp_Q7mK2xR9tY4bN6vC1wZ8sL0pJ5hG3dA2fX4n"
+	content := `export const api = "/api/internal/secrets?role=admin";` + "\n" +
+		`const token = "` + token + `";`
+	mapBody, err := json.Marshal(map[string]any{
+		"version":        3,
+		"sources":        []string{"src/api.ts"},
+		"sourcesContent": []string{content},
+	})
+	if err != nil {
+		t.Fatalf("marshal map: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `<html><body><script src="/app.js"></script></body></html>`)
+	})
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprint(w, "/* bundle */\n//# sourceMappingURL=app.js.map\n")
+	})
+	mux.HandleFunc("/app.js.map", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(mapBody)
+	})
+	mux.HandleFunc("/api/internal/secrets", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "<html><body><p>%s</p></body></html>", r.URL.Query().Get("role"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.Stats.SourceMaps != 1 {
+		t.Fatalf("source maps = %d, want 1", result.Stats.SourceMaps)
+	}
+	if result.Stats.Endpoints == 0 {
+		t.Fatal("no endpoint was extracted from the source map")
+	}
+
+	secretFromMap := false
+	reflectFound := false
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindSecret && strings.Contains(candidate.URL, "app.js.map#src/api.ts") {
+			secretFromMap = true
+		}
+		if candidate.Kind == finding.KindReflect && strings.Contains(candidate.URL, "/api/internal/secrets") {
+			reflectFound = true
+		}
+	}
+	if !secretFromMap {
+		t.Fatalf("no secret was reported from the map source: %+v", result.Findings)
+	}
+	if !reflectFound {
+		t.Fatalf("the map endpoint was not probed: %+v", result.Findings)
+	}
+}
+
+func TestRunSkipsMalformedSourceMap(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body><script src="/app.js"></script></body></html>`)
+	})
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "//# sourceMappingURL=/broken.map")
+	})
+	mux.HandleFunc("/broken.map", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"version":3,"sources":[`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("a malformed map must not fail the scan: %v", err)
+	}
+	if result.Stats.SourceMaps != 0 {
+		t.Fatalf("source maps = %d, want 0 for a malformed map", result.Stats.SourceMaps)
+	}
+}
+
+func TestRunMinesJSONPageParameters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":{"callback":%q,"id":7}}`, r.URL.Query().Get("callback"))
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{Target: server.URL + "/", Client: client, SkipPath: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Stats.Parameters < 2 {
+		t.Fatalf("parameters = %d, want callback and id", result.Stats.Parameters)
+	}
+	found := false
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindReflect {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("JSON-mined parameters were not probed: %+v", result.Findings)
+	}
+}
+
+// TestRunMinesJSONFromProbeResponse covers the second pass: keys discovered in
+// an API answer are probed even though the parameter snapshot already happened.
+func TestRunMinesJSONFromProbeResponse(t *testing.T) {
+	var redirectHits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if redirect := r.URL.Query().Get("redirect"); redirect != "" {
+			atomic.AddInt32(&redirectHits, 1)
+			fmt.Fprintf(w, `{"redirect":%q}`, redirect)
+			return
+		}
+		if r.URL.Query().Get("q") == "hello" {
+			fmt.Fprint(w, `{"q":"hello"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"redirect":"/somewhere","q":%q}`, r.URL.Query().Get("q"))
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target: server.URL + "/?q=hello", Client: client, SkipPath: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if atomic.LoadInt32(&redirectHits) == 0 {
+		t.Fatalf("the JSON-discovered redirect parameter was never probed: %+v", result.Findings)
 	}
 }
 

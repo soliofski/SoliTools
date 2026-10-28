@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.12.0` · **Branch:** `main` · **Commits:** 24
-**Size:** 73 Go files (45 source, 28 test), ~12,700 lines including tests, 215 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.13.0` · **Branch:** `main` · **Commits:** 25
+**Size:** 77 Go files (47 source, 30 test), ~13,500 lines including tests, 232 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -326,10 +326,12 @@ flowchart TD
     PAGE --> SCRIPTS["js.ScriptURLs<br/>drop third-party hosts"]
     SCRIPTS --> FETCHJS["fetch up to 10 first-party bundles<br/>4 concurrent"]
     FETCHJS --> SEC2["secret.Scan<br/>each bundle"]
-    FETCHJS --> ENDP["js.ExtractEndpoints"]
-    ENDP --> PARAMS["param.Names<br/>drops utm_ and fbclid"]
+    FETCHJS --> MAPS["fetch up to 5 same-origin maps<br/>scan sourcesContent"]
+    MAPS --> ENDP["js.ExtractEndpoints"]
+    ENDP --> PARAMS["param.Names + JSON keys<br/>drops utm_ and fbclid"]
     PARAMS --> PROBE["probe up to 10 parameters<br/>reflect + redirect"]
-    PROBE --> STORED["reflect.Stored<br/>when -stored"]
+    PROBE --> JSONP["mine JSON answers<br/>bounded second pass"]
+    JSONP --> STORED["reflect.Stored<br/>when -stored"]
     STORED --> PATHS["pathscan<br/>default 20 or custom list"]
     PATHS --> DEDUPE["dedupe + sort by confidence"]
     DEDUPE --> OUT(["scan.Result"])
@@ -563,12 +565,34 @@ Invariants:
 Deliberate omissions: inline `<script>` bodies are **not** scanned separately —
 the page body already contains them, and scanning both double-counted secrets.
 
+**Source maps (`sourcemap.go`).** `SourceMapURL(source, scriptURL, header)`
+looks for `SourceMap` / `X-SourceMap` headers and a trailing
+`sourceMappingURL` comment (line or block; the last 4 KiB only). The URL is
+resolved against the script and must be exactly same scheme/host/port; a CDN
+map is rejected. `ParseSourceMap` accepts v3 only — an older or truncated map
+returns an error instead of half-parsed content.
+
+`scan` fetches at most five maps per run, concurrency 4, 10 MiB each via
+`Client.GetLimited` (the normal page cap stays 3 MiB). Each `sourcesContent`
+entry is scanned as source: `secret.Scan`, `ExtractEndpoints`, and
+`EndpointParameters`, which turns `/users/:id` into `/users/1` and returns
+`id` for probing. A malformed map is skipped silently, not fatal; `Stats`
+carries `SourceMaps`.
+
 ### 8.3 `param` — classification
 
 Curated lists, not heuristics. `High` (redirect, file, template sinks),
 `Medium` (identifiers, content), `Noise` (`utm_*`, `fbclid`, `gclid`, …).
 `Names()` returns query parameters in document order, deduped, noise removed.
 Only `Noise` is filtered; the rest are ranked by interest in `scan`.
+
+`FromJSON(body, depth)` walks objects up to three levels (arrays do not consume
+depth), keeps only High/Medium keys, and sorts the result so the output is
+deterministic despite Go map iteration. A page or crawled response that is
+JSON (media type or `{`/`[` shape) contributes names before the parameter
+snapshot. Names mined from a **probe** response arrive after that snapshot, so
+`scan` runs one bounded second pass over at most five of them; the second pass
+never mines again.
 
 ### 8.4 `reflect` — proof of reflection
 
@@ -858,7 +882,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-215 test functions. The distribution matters more than the number:
+232 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -868,13 +892,13 @@ Rules that must survive future edits:
 | `cmd` (23) | exit codes, flags, JSON schema, quiet, colour, form/stored/crawl opt-in, wordlist and TUI errors |
 | `form` (10) | action resolution, field classes, destructive detection |
 | `crawl` (6) | same-origin and port rules, asset/logout exclusions, normalisation, cap |
-| `httpx` (9) | POST body, redirect policy, header injection, error classes, response observer |
-| `js` (6) | script resolution, third-party, endpoint filtering |
-| `param` (4) | classification, noise removal |
+| `httpx` (10) | POST body, redirect policy, header injection, error classes, response observer, per-request body cap |
+| `js` (13) | script resolution, third-party, endpoint filtering, source map discovery and v3 parsing |
+| `param` (9) | classification, noise removal, JSON key mining and depth |
 | `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
 | `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
 | `pathscan` (9) | status filter, soft-404, catch-all host, wordlist loading and cap, block-page guard |
-| `scan` (18) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception |
+| `scan` (22) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining |
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (27) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering, WAF badge |
@@ -914,6 +938,9 @@ hosts.
 | A provider response never puts the token in a field | `TestApplyVerifiesSupportedProviders` (`assertNoTokenInFields`) |
 | A WAF block page never yields a reflection or path finding | `TestRunSuppressesReflectionOnWAFBlockPage`, `TestEvaluateRejectsWAFBlockPages` |
 | Interception is reported only after three consecutive blocks | `TestRunWarnsOnConsecutiveBlocks`, `TestRunDoesNotWarnBeforeThreeBlocks` |
+| A source map is only fetched same-origin, at most five per run | `TestSourceMapURLRejectsOtherOrigins`, `TestRunMinesSourceMaps` |
+| A malformed map is skipped, never fatal | `TestParseSourceMapRejectsBadInput`, `TestRunSkipsMalformedSourceMap` |
+| JSON mining stops at depth three and never recurses | `TestFromJSONRespectsDepth`, `TestRunMinesJSONFromProbeResponse` |
 | The TUI refuses a non-terminal instead of writing escapes into a pipe | `TestTUIRefusesWithoutTerminal` |
 | Exit codes: 0 clean, 1 findings, 2 error | `cmd` tests |
 
@@ -962,7 +989,9 @@ hosts.
 | done | ~~Interactive TUI~~ | Shipped in 0.10.0: `solitools tui` (or a bare invocation on a terminal), configuration form, live monitor with cancellation, findings explorer with mask toggle and JSON/SARIF save. |
 | done | ~~Live credential validation~~ | Shipped in 0.11.0 as `-verify`: five read-only provider identity checks, `live-validation` ±signals, skipped on transient failure. Opt-in, dedicated client, four workers. |
 | done | ~~WAF and block detection~~ | Shipped in 0.12.0: passive provider detection, interception warning after three blocks, and block-page guards in reflection and path scanning. |
-| 1 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
+| done | ~~Parameter mining from source maps and JSON responses~~ | Shipped in 0.13.0: same-origin v3 maps (five per run, 10 MiB cap) feeding endpoints, secrets and route bindings; JSON keys mined to depth three with a bounded second probe pass. |
+| 1 | **Authenticated scanning** | A session file (cookies, headers) would unlock logged-in surface, but it changes the tool from observer to user; needs a design decision and a scope guard. |
+| 2 | **DOM XSS analysis** | The bundles are already fetched; tracing sources to sinks is a new detection model and should stay separate from the canary probe. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.
@@ -987,6 +1016,9 @@ reports evidence; it does not weaponise it.
 - WAF detection is signature-based. A bespoke firewall may only appear as a
   generic block, and the generic 403 heuristic ignores plain "Forbidden" pages
   on purpose so genuine findings are not hidden.
+- Mining is bounded: five maps per run at 10 MiB, JSON depth three, and five
+  second-pass parameters. A map behind a CDN or in a non-standard format is
+  skipped rather than guessed at.
 - `-verify` covers five providers and only answers "is this key active?". It
   does not check scopes, permissions or account identity beyond the login name
   the provider returns, and a provider outage yields `skipped`, not a verdict.

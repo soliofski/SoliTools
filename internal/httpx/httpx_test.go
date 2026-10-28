@@ -146,6 +146,33 @@ func TestObserverSeesResponsesAndCanBeCleared(t *testing.T) {
 	}
 }
 
+func TestGetLimitedCapsBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("a", 100))
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	limited, err := client.GetLimited(context.Background(), server.URL, 10)
+	if err != nil {
+		t.Fatalf("get limited: %v", err)
+	}
+	if len(limited.Body) != 10 || !limited.Truncated {
+		t.Fatalf("limited body = %d bytes truncated=%v, want 10/true", len(limited.Body), limited.Truncated)
+	}
+
+	full, err := client.Get(context.Background(), server.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(full.Body) != 100 || full.Truncated {
+		t.Fatalf("full body = %d bytes truncated=%v, want 100/false", len(full.Body), full.Truncated)
+	}
+}
+
 func TestRequestCounter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
