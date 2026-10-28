@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.11.0` · **Branch:** `main` · **Commits:** 20
-**Size:** 70 Go files (43 source, 27 test), ~11,950 lines including tests, 202 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.11.0` · **Branch:** `main` · **Commits:** 22
+**Size:** 70 Go files (43 source, 27 test), ~12,000 lines including tests, 203 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -808,7 +808,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-202 test functions. The distribution matters more than the number:
+203 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -828,7 +828,7 @@ Rules that must survive future edits:
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (26) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering |
-| `verify` (8) | five provider shapes, active/revoked/skipped, timeout, input immutability, no token in fields |
+| `verify` (9) | five provider shapes, active/revoked/skipped, timeout, redirect refusal, input immutability, no token in fields |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
@@ -959,6 +959,7 @@ reports evidence; it does not weaponise it.
 | `babdd21` | feat(tui): add an interactive terminal UI | `internal/tui`, `solitools tui`, live monitor, explorer, JSON/SARIF save |
 | `631c0cd` | fix(tui): stop VT input from typing "[A"/"[B" instead of navigating | clear `ENABLE_VIRTUAL_TERMINAL_INPUT`; `rawInputMode` unit test |
 | `05c6576` | feat(verify): add opt-in live credential validation | `internal/verify`, `-verify`, TUI checkbox, `live-validation` signals |
+| `90a6a39` | fix(verify): give each verifier its own HTTP client | per-verifier client; redirect-refusal test |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
