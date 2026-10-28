@@ -1,8 +1,8 @@
 # SoliTools — Handover for the next agent
 
 **Status:** working, tested, committed. Nothing is half-finished or uncommitted.
-**Version:** `0.10.1` · **Branch:** `main` · **Commits:** 18
-**Size:** 68 Go files (42 source, 26 test), ~11,200 lines including tests, 192 test functions, 21 secret rules, zero external dependencies.
+**Version:** `0.11.0` · **Branch:** `main` · **Commits:** 19
+**Size:** 70 Go files (43 source, 27 test), ~11,950 lines including tests, 202 test functions, 21 secret rules, zero external dependencies.
 **Last verified:** `gofmt` clean · `go vet` clean · `go test -count=1 ./...` all green · cross-compiles for `linux` and `darwin`.
 
 Latest commits: run `git log --oneline -6`. Hashes age; the invariants below do not.
@@ -113,6 +113,7 @@ scripts and CI never get a half-interactive session.
 | `-wordlist` | none | custom sensitive-path wordlist (capped at 200) |
 | `-forms` | off | submit POST forms (state-changing; same-origin only) |
 | `-stored` | off | re-fetch known pages to detect stored / blind XSS |
+| `-verify` | off | validate supported credentials against provider APIs |
 | `-crawl` | off | follow same-origin seed links, depth one |
 | `-max-pages` | 10 | pages fetched when crawling, seed included |
 | `-verbose` | off | print the score derivation and signals |
@@ -186,6 +187,7 @@ internal/errgroup  local subset of x/sync/errgroup (no external deps)
 internal/finding   shared result type; no printing
 internal/confidence scoring model: base + signals, clamp, band
 internal/secret    credential detection
+internal/verify    read-only provider identity validation
 internal/js        script triage + endpoint extraction
 internal/form      HTML form parsing, safety classification
 internal/crawl     depth-one same-origin link discovery
@@ -209,6 +211,7 @@ flowchart LR
     TUI["internal/tui<br/>form, monitor, explorer"]
 
     SECRET["internal/secret"]
+    VERIFY["internal/verify"]
     JS["internal/js"]
     FORM["internal/form"]
     CRAWL["internal/crawl"]
@@ -230,6 +233,7 @@ flowchart LR
     TUI --> SCAN
     TUI --> REPORT
     SCAN --> SECRET
+    SCAN --> VERIFY
     SCAN --> JS
     SCAN --> FORM
     SCAN --> CRAWL
@@ -287,6 +291,7 @@ flowchart LR
     ├── report/                text, JSON, quiet, masking
     ├── scan/                  orchestrator + dedupe
     ├── secret/                rules, scanner, comments, context, entropy
+    ├── verify/                read-only provider identity checks
     ├── term/                  palette, TTY, width/height (windows + unix)
     └── tui/                   form, live monitor, findings explorer
 ```
@@ -725,6 +730,44 @@ counts come from `scan.Options.Notify` (called per finding, before dedupe) and
 `report.Render` with `JSON` or `SARIF`, so the file is byte-identical to the CLI
 and secrets stay masked on disk regardless of what the screen is revealing.
 
+### 8.9 `verify` — live credential validation
+
+`verify.New().Apply(ctx, findings)` is the only code that talks to a third
+party. It runs after dedupe, so a credential is checked once, and only when
+`scan.Options.Verify` is true.
+
+Provider mapping is a table, not a heuristic: rule IDs point at one read-only
+endpoint each (GitHub `/user`, Slack `POST /api/auth.test`, GitLab
+`/api/v4/user`, OpenAI `/v1/models`, Anthropic `/v1/models`). `BaseURLs` is the
+only injection point; tests point an entry at `httptest` so no real API is ever
+contacted.
+
+Results are signals, never gates:
+
+| Answer | Effect |
+|--------|--------|
+| 200 with an identity | `live-validation +15`, clamp 100, `Status: active (<identity>)` |
+| 401/403, or Slack 200 `ok:false` | `live-validation -30`, `Status: revoked / invalid` |
+| timeout, 429, 5xx, network failure | no signal, score unchanged, `Validation: skipped (<reason>)` |
+
+Safety invariants:
+
+- **Opt-in only.** Without `-verify` no verifier is constructed and no
+  provider is contacted. `TestRunVerifyIsOptInAndInjectable` asserts zero hits
+  when the flag is off and exactly one when it is on.
+- **Never the scan client.** `verify.New` builds a fresh `http.Client` with a
+  10 s timeout and no target headers or cookies, so a target's `Authorization`
+  header cannot leak to a provider.
+- **Tokens stay in headers.** They are never put in URLs, fields, validation
+  reasons or error strings; `classify` returns fixed words, never `err.Error()`.
+- Redirects are disabled (`ErrUseLastResponse`) and bodies are capped at 1 MiB.
+- At most four checks run concurrently (`errgroup` limit), one request per
+  finding.
+
+`confidence.Adjust` backs the score change: it clamps, rounds, recomputes the
+band and appends the signal, so a late adjustment is as auditable as a detector
+signal.
+
 ---
 
 ## 9. Rendering
@@ -765,7 +808,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-192 test functions. The distribution matters more than the number:
+202 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -781,10 +824,11 @@ Rules that must survive future edits:
 | `reflect` (13) | context classification, POST bodies, escaped reflection rejected, stored pass |
 | `redirect` (9) | external verified, internal ignored, echo ignored, every backslash payload style |
 | `pathscan` (8) | status filter, soft-404, catch-all host, wordlist loading and cap |
-| `scan` (13) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist |
-| `confidence` (10) | bands, clamping, rounding, NaN, trace immutability |
+| `scan` (14) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in |
+| `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (26) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering |
+| `verify` (8) | five provider shapes, active/revoked/skipped, timeout, input immutability, no token in fields |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
@@ -815,6 +859,8 @@ hosts.
 | Scores are deterministic and clamped | `internal/confidence` tests |
 | Piped text output has no escapes and no wrapping | `TestPlainReportHasNoEscapes`, `TestNoWrappingWithoutWidth` |
 | A masked TUI frame never contains the raw secret | `TestRenderResultsShowsListAndDetail` |
+| No provider is contacted without `-verify` | `TestRunVerifyIsOptInAndInjectable` |
+| A provider response never puts the token in a field | `TestApplyVerifiesSupportedProviders` (`assertNoTokenInFields`) |
 | The TUI refuses a non-terminal instead of writing escapes into a pipe | `TestTUIRefusesWithoutTerminal` |
 | Exit codes: 0 clean, 1 findings, 2 error | `cmd` tests |
 
@@ -861,8 +907,8 @@ hosts.
 | done | ~~Stored / blind reflection~~ | Shipped in 0.8.0 as `-stored`: `Submit` keeps the evidence, a second pass re-fetches known pages, and only canaries absent from the immediate response qualify. Same-origin, capped at five pages, no out-of-band listener. |
 | done | ~~Multi-page crawl~~ | Shipped in 0.9.0 as `-crawl` + `-max-pages`: depth one, exact origin, assets and destructive paths excluded, crawled pages feeding secrets, forms, parameters and stored observation. |
 | done | ~~Interactive TUI~~ | Shipped in 0.10.0: `solitools tui` (or a bare invocation on a terminal), configuration form, live monitor with cancellation, findings explorer with mask toggle and JSON/SARIF save. |
-| 1 | **Live credential validation** | Only behind an explicit flag and only against providers with a harmless "who am I" endpoint. It converts structural scores into confirmed ones, but it is the only feature that would make the tool talk to third parties. Treat as a design decision, not a chore. |
-| 2 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
+| done | ~~Live credential validation~~ | Shipped in 0.11.0 as `-verify`: five read-only provider identity checks, `live-validation` ±signals, skipped on transient failure. Opt-in, dedicated client, four workers. |
+| 1 | **Parameter mining from source maps and JSON responses** | The `js` module already reads bundles; mining their source maps and JSON payloads is the cheapest way to widen parameter coverage without crawling. |
 
 Explicitly **not** planned: evasion, WAF bypass, exploit payloads. The tool
 reports evidence; it does not weaponise it.
@@ -884,6 +930,9 @@ reports evidence; it does not weaponise it.
   and its interactive layer is not covered by automated tests — the state
   models, decoders and rendered frames are, but a real console is still the
   only way to exercise raw mode end to end.
+- `-verify` covers five providers and only answers "is this key active?". It
+  does not check scopes, permissions or account identity beyond the login name
+  the provider returns, and a provider outage yields `skipped`, not a verdict.
 - Third-party detection uses a small suffix table, so exotic TLDs (`co.zw`,
   `com.ar`) may be misclassified.
 - JWTs are reported on structure alone; many are legitimately public.
@@ -927,8 +976,10 @@ threshold inside the scanner.
    other field keeps its default value so CSRF tokens survive. If this is ever
    enabled by default, re-open the decision — a form submission can create
    records or send mail.
-3. **Live validation.** Any provider check means contacting a third party with a
-   user's credential. That is a product decision, not an implementation detail.
+3. **Live validation.** Decided in 0.11.0: `-verify` is opt-in, uses only a
+   read-only identity endpoints for five providers, never reuses the scan
+   client, and reports skipped checks without touching the score. Adding a
+   provider is a design decision (what does a 200 prove?), not just a URL.
 4. **Crawl depth.** Decided in 0.9.0: `-crawl` is opt-in, depth one, exact
    origin, and `-max-pages` (default 10) counts the seed. Widening to depth two
    would multiply requests and hand control of the request plan to the target,

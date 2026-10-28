@@ -465,6 +465,7 @@ func (a *app) renderForm(frame *strings.Builder) {
 	a.formRow(frame, rowCrawl, checkbox(a.form.Crawl)+" Crawl same-origin pages "+a.dim("(-crawl)"))
 	a.formRow(frame, rowForms, checkbox(a.form.Forms)+" Probe POST form parameters "+a.dim("(-forms)"))
 	a.formRow(frame, rowStored, checkbox(a.form.Stored)+" Detect stored/blind reflection "+a.dim("(-stored)"))
+	a.formRow(frame, rowVerify, checkbox(a.form.Verify)+" Verify credentials with providers "+a.dim("(-verify)"))
 	a.formRow(frame, rowSkipPath, checkbox(a.form.SkipPath)+" Skip sensitive path scan "+a.dim("(-skip-path)"))
 	a.formRow(frame, rowMask, checkbox(a.form.Mask)+" Mask secrets in output "+a.dim("(-mask)"))
 	a.blank(frame)

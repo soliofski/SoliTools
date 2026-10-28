@@ -34,6 +34,7 @@ const (
 	rowCrawl
 	rowForms
 	rowStored
+	rowVerify
 	rowSkipPath
 	rowMask
 	rowThresholdDefault
@@ -55,6 +56,7 @@ type Form struct {
 	Crawl     bool
 	Forms     bool
 	Stored    bool
+	Verify    bool
 	SkipPath  bool
 	Mask      bool
 	Threshold int // 0 default, 1 strict, 2 all
@@ -92,7 +94,7 @@ func (f *Form) MoveFocus(delta int) {
 // Checkbox reports whether row is a checkbox row.
 func isCheckbox(row int) bool {
 	switch row {
-	case rowCrawl, rowForms, rowStored, rowSkipPath, rowMask:
+	case rowCrawl, rowForms, rowStored, rowVerify, rowSkipPath, rowMask:
 		return true
 	}
 	return false
@@ -107,6 +109,8 @@ func (f *Form) Toggle() {
 		f.Forms = !f.Forms
 	case rowStored:
 		f.Stored = !f.Stored
+	case rowVerify:
+		f.Verify = !f.Verify
 	case rowSkipPath:
 		f.SkipPath = !f.SkipPath
 	case rowMask:
@@ -251,6 +255,7 @@ func (f Form) ScanOptions(client *httpx.Client, progress func(string), notify fu
 		MaxPages:     f.MaxPages,
 		EnableForms:  f.Forms,
 		EnableStored: f.Stored,
+		Verify:       f.Verify,
 		SkipPath:     f.SkipPath,
 		MaxParams:    scan.DefaultMaxParams,
 		Progress:     progress,

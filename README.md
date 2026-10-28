@@ -32,6 +32,7 @@ Two opt-in modes worth knowing up front:
 ```console
 $ solitools scan -crawl -max-pages 5 -wordlist paths.txt https://target.example/
 $ solitools scan -forms -stored -rate 50 https://target.example/
+$ solitools scan -verify https://target.example/
 ```
 
 ```console
@@ -80,6 +81,7 @@ usage or runtime error.
 | `-wordlist` | none | custom sensitive-path wordlist (capped at 200 entries) |
 | `-forms` | off | submit POST forms (may change state; same-origin only) |
 | `-stored` | off | re-fetch known pages to detect stored/blind XSS |
+| `-verify` | off | validate supported credentials against provider identity APIs |
 | `-crawl` | off | follow same-origin links on the seed page (depth 1) |
 | `-max-pages` | 10 | maximum pages fetched when crawling, seed included |
 | `-verbose` | off | print the score derivation |
@@ -97,9 +99,10 @@ Authentication is `-header "Authorization: Bearer …"` plus `-cookie`.
 interface over the same engine:
 
 1. **Configure.** Target URL with an editable cursor, checkboxes for crawl,
-   forms, stored detection, skip-path and masking, a confidence radio group
-   (default ≥ 60, strict ≥ 75, all ≥ 0), and numeric rate/page limits.
-   `↑/↓` moves, space toggles, `←/→` adjusts, Enter starts, `Esc`/`q` exits.
+   forms, stored detection, credential verification, skip-path and masking, a
+   confidence radio group (default ≥ 60, strict ≥ 75, all ≥ 0), and numeric
+   rate/page limits. `↑/↓` moves, space toggles, `←/→` adjusts, Enter starts,
+   `Esc`/`q` exits.
 2. **Monitor.** A spinner shows the active stage, with elapsed time, request
    count, measured rate and findings per confidence band. `Esc`/`Ctrl+C`
    cancels the scan and keeps what was found so far.
@@ -241,6 +244,43 @@ Accuracy work behind the table:
 - **Secrets are masked by default**, including inside `Context` — masking only
   the value line would leak the credential anyway.
 
+### verify — live credential validation
+
+Structural scores answer "does this look like a real key?". `-verify` answers
+the next question, for the five providers that expose a harmless read-only
+identity endpoint:
+
+| Provider | Rules | Request | Proof of life |
+| --- | --- | --- | --- |
+| GitHub | `secret.github-token`, `secret.github-fine-grained-pat` | `GET /user`, `Authorization: Bearer`, `User-Agent: solitools` | `login` |
+| Slack | `secret.slack-token` | `POST /api/auth.test`, `Authorization: Bearer` | `ok:true`, `user`/`team` |
+| GitLab | `secret.gitlab-pat` | `GET /api/v4/user`, `Authorization: Bearer` | `username` |
+| OpenAI | `secret.openai-api-key` | `GET /v1/models`, `Authorization: Bearer` | `200` |
+| Anthropic | `secret.anthropic-api-key` | `GET /v1/models`, `x-api-key` + `anthropic-version` | `200` |
+
+Outcomes, in confidence terms:
+
+- **Active** — `live-validation +15`, clamped to 100, band `critical`, plus
+  `Status: active (<login/username>)`.
+- **401/403, or Slack `ok:false`** — `live-validation -30`, plus
+  `Status: revoked / invalid`. A key the provider rejects is weaker evidence
+  than one it has never seen.
+- **Timeout, rate limit, 5xx** — no penalty and no signal; the structural score
+  stands and the finding carries `Validation: skipped (<reason>)`.
+
+Safety and cost, since this is the only feature that talks to a third party:
+
+- Strictly opt-in. Without `-verify`, the verifier is never constructed and no
+  provider is contacted.
+- The scan client is **not** reused: a fresh client with its own timeout sends
+  no target headers or cookies, so a target's `Authorization` header cannot
+  leak to a provider. Tokens travel in request headers, never URLs, fields or
+  error strings.
+- Requests are read-only, one per finding, at most four concurrent, with
+  redirects disabled and response bodies capped at 1 MiB.
+- A provider name can be pointed at another origin through `verify.Verifier`,
+  which is how the tests use `httptest` instead of the real APIs.
+
 ### js — script triage and endpoint extraction
 
 Scripts on the same registrable domain are fetched; analytics, tag managers and
@@ -365,8 +405,9 @@ stored by a form on one page is found on a listing page.
 
 ## Known limitations
 
-- No live validation of credentials (no provider API calls); scores are
-  structural.
+- Credential scores are structural by default. `-verify` checks only GitHub,
+  Slack, GitLab, OpenAI and Anthropic, only whether the credential is active,
+  and not what it is allowed to do.
 - Reflection detection is single-shot on the page itself. With `-stored` the
   scan re-fetches known pages once, later in the run; truly blind XSS needs an
   out-of-band listener and is out of scope.
@@ -381,4 +422,3 @@ a custom file capped at 200 entries.
 ## Next steps
 
 1. Parameter mining from source maps and JSON responses.
-2. Provider-specific live validation behind an explicit flag.

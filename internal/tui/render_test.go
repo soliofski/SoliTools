@@ -56,6 +56,7 @@ func TestRenderFormShowsEveryControl(t *testing.T) {
 		"Crawl same-origin pages",
 		"Probe POST form parameters",
 		"Detect stored/blind reflection",
+		"Verify credentials with providers",
 		"Skip sensitive path scan",
 		"Mask secrets in output",
 		"(•) Default (>= 60)",

@@ -27,6 +27,7 @@ import (
 	"solitools/internal/redirect"
 	"solitools/internal/reflect"
 	"solitools/internal/secret"
+	"solitools/internal/verify"
 )
 
 // Defaults for Options.
@@ -76,6 +77,12 @@ type Options struct {
 	Wordlist []string
 	// WordlistTruncated reports that a custom list was capped while loading.
 	WordlistTruncated bool
+	// Verify actively validates supported credentials against provider identity
+	// APIs. Off by default: it is the only path that contacts a third party.
+	Verify bool
+	// Verifier overrides the default verifier. Tests inject one with local base
+	// URLs so no provider is ever contacted.
+	Verifier *verify.Verifier
 	// Progress is called at each pipeline stage with a short human label. It is
 	// always invoked from the goroutine that called Run, never concurrently.
 	Progress func(stage string)
@@ -376,6 +383,18 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	result.Findings = dedupe(collected.findings)
+
+	// Live validation is the only stage that leaves the target's origin, so it
+	// runs last, once dedupe has collapsed a credential to one finding. Skipped
+	// checks leave the structural score untouched.
+	if options.Verify {
+		options.reportProgress("verifying credentials")
+		verifier := options.Verifier
+		if verifier == nil {
+			verifier = verify.New()
+		}
+		result.Findings = verifier.Apply(ctx, result.Findings)
+	}
 	result.Stats.Gated = collected.gated
 	result.Stats.ByReason = collected.byReason
 	result.Stats.Requests = int(options.Client.Requests())

@@ -5,6 +5,39 @@ import (
 	"testing"
 )
 
+// TestAdjustClampsAndTraces covers the post-detection signal used by live
+// validation: the score moves, the band follows, the trace grows, and the
+// original value is not mutated.
+func TestAdjustClampsAndTraces(t *testing.T) {
+	original := Score{
+		Base:    90,
+		Value:   95,
+		Band:    BandOf(95),
+		Signals: []Signal{{Name: "entropy", Delta: 5, Reason: "high entropy"}},
+	}
+	verified := Adjust(original, "live-validation", 15, "confirmed active")
+	if verified.Value != 100 {
+		t.Fatalf("value = %v, want clamped 100", verified.Value)
+	}
+	if verified.Band != BandCritical {
+		t.Fatalf("band = %q, want critical", verified.Band)
+	}
+	if len(verified.Signals) != 2 || verified.Signals[1].Name != "live-validation" {
+		t.Fatalf("signals = %+v, want the new signal appended", verified.Signals)
+	}
+	if original.Value != 95 || len(original.Signals) != 1 {
+		t.Fatalf("Adjust mutated its input: %+v", original)
+	}
+
+	revoked := Adjust(Score{Value: 55, Band: BandOf(55)}, "live-validation", -30, "revoked")
+	if revoked.Value != 25 || revoked.Band != BandLow {
+		t.Fatalf("revoked score = %v/%q, want 25/low", revoked.Value, revoked.Band)
+	}
+	if floored := Adjust(Score{Value: 10, Band: BandOf(10)}, "x", -30, "y"); floored.Value != 0 {
+		t.Fatalf("floored score = %v, want 0", floored.Value)
+	}
+}
+
 func TestBandOf(t *testing.T) {
 	cases := []struct {
 		value float64

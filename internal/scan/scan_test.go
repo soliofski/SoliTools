@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"solitools/internal/finding"
 	"solitools/internal/httpx"
+	"solitools/internal/verify"
 )
 
 // testToken is assembled from two literals so this source file never looks like
@@ -588,6 +590,98 @@ func TestRunSkipsStoredOnContaminatedBaseline(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("warnings = %v, want the skip reason", result.Warnings)
+	}
+}
+
+// secretFinding returns the single secret finding in a result.
+func secretFinding(t *testing.T, result Result) finding.Finding {
+	t.Helper()
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindSecret {
+			return candidate
+		}
+	}
+	t.Fatalf("no secret finding: %+v", result.Findings)
+	return finding.Finding{}
+}
+
+func hasSignal(candidate finding.Finding, name string) bool {
+	for _, signal := range candidate.Confidence.Signals {
+		if signal.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func hasField(candidate finding.Finding, name, value string) bool {
+	for _, field := range candidate.Fields {
+		if field.Name == name && field.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunVerifyIsOptInAndInjectable proves both halves of the contract: without
+// Verify the injected verifier is never called, and with it the same finding
+// gains the live-validation signal and the provider identity.
+func TestRunVerifyIsOptInAndInjectable(t *testing.T) {
+	var hits int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ghp_") {
+			t.Errorf("authorization header = %q", got)
+		}
+		w.Write([]byte(`{"login":"octocat"}`))
+	}))
+	defer provider.Close()
+
+	token := "ghp_Q7mK2xR9tY4bN6vC1wZ8sL0pJ5hG3dA2fX4n"
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "<html><body><script>const token = %q;</script></body></html>", token)
+	}))
+	defer target.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	verifier := verify.New()
+	verifier.BaseURLs["github"] = provider.URL
+
+	off, err := Run(context.Background(), Options{
+		Target: target.URL + "/", Client: client, SkipPath: true, Verifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("Run without verify: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("provider was called %d times without Verify", got)
+	}
+	if hasSignal(secretFinding(t, off), "live-validation") {
+		t.Fatal("an unverified finding must not carry a live-validation signal")
+	}
+
+	on, err := Run(context.Background(), Options{
+		Target: target.URL + "/", Client: client, SkipPath: true,
+		Verify: true, Verifier: verifier,
+	})
+	if err != nil {
+		t.Fatalf("Run with verify: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("provider was called %d times, want exactly one", got)
+	}
+	verified := secretFinding(t, on)
+	if verified.Confidence.Value != 100 {
+		t.Fatalf("confidence = %v, want clamped 100", verified.Confidence.Value)
+	}
+	if !hasSignal(verified, "live-validation") {
+		t.Fatalf("signals = %+v, want live-validation", verified.Confidence.Signals)
+	}
+	if !hasField(verified, "Status", "active (octocat)") {
+		t.Fatalf("fields = %+v, want the provider identity", verified.Fields)
 	}
 }
 

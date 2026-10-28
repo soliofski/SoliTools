@@ -74,6 +74,28 @@ type Score struct {
 	Signals []Signal `json:"signals,omitempty"`
 }
 
+// Adjust applies one post-hoc signal to a finished score: the value is clamped
+// to [0, 100] and rounded to one decimal, the band is recomputed, and the
+// signal is appended to the trace. It exists for evidence that arrives after
+// detection — live credential validation is the only current caller — so that
+// even a late adjustment stays explainable.
+func Adjust(score Score, name string, delta float64, reason string) Score {
+	value := score.Value + delta
+	if value > 100 {
+		value = 100
+	}
+	if value < 0 {
+		value = 0
+	}
+	score.Value = math.Round(value*10) / 10
+	score.Band = BandOf(score.Value)
+
+	signals := make([]Signal, len(score.Signals), len(score.Signals)+1)
+	copy(signals, score.Signals)
+	score.Signals = append(signals, Signal{Name: name, Delta: delta, Reason: reason})
+	return score
+}
+
 // BandOf returns the band for an arbitrary value, clamped to [0, 100].
 func BandOf(v float64) Band {
 	switch {

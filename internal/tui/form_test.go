@@ -15,6 +15,9 @@ func TestNewFormDefaults(t *testing.T) {
 	if form.SkipPath {
 		t.Fatal("skip-path must default off")
 	}
+	if form.Verify {
+		t.Fatal("credential verification must default off: it contacts third parties")
+	}
 	if !form.Mask {
 		t.Fatal("masking must default on")
 	}
@@ -49,6 +52,12 @@ func TestFormTogglesCheckboxesAndRadios(t *testing.T) {
 	form.Toggle()
 	if form.Mask {
 		t.Fatal("space must untick masking")
+	}
+
+	form.Focus = rowVerify
+	form.Toggle()
+	if !form.Verify {
+		t.Fatal("space must tick verification")
 	}
 
 	form.Focus = rowThresholdStrict
@@ -165,6 +174,7 @@ func TestFormBuildsScanOptions(t *testing.T) {
 	form.Forms = true
 	form.Stored = true
 	form.SkipPath = true
+	form.Verify = true
 	form.Rate = 50
 	form.MaxPages = 5
 
@@ -178,6 +188,9 @@ func TestFormBuildsScanOptions(t *testing.T) {
 	}
 	if options.EnableCrawl || !options.EnableForms || !options.EnableStored || !options.SkipPath {
 		t.Fatalf("flags = %+v", options)
+	}
+	if !options.Verify {
+		t.Fatal("verification was ticked but not wired into scan options")
 	}
 	if options.MaxPages != 5 {
 		t.Fatalf("max pages = %d", options.MaxPages)

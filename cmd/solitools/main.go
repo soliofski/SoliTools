@@ -25,7 +25,7 @@ import (
 	"solitools/internal/tui"
 )
 
-const version = "0.10.1"
+const version = "0.11.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -83,6 +83,7 @@ Flags for scan:
   -wordlist string        custom sensitive-path wordlist (capped at 200 entries)
   -forms                  submit POST forms (may change state; same-origin only)
   -stored                 re-fetch known pages to detect stored/blind XSS
+  -verify                 validate supported credentials against provider APIs
   -crawl                  follow same-origin links on the seed page (depth 1)
   -max-pages int          maximum pages fetched when crawling, seed included (default 10)
   -verbose                show the score derivation
@@ -150,6 +151,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	skipPath := flags.Bool("skip-path", false, "skip the sensitive-path wordlist")
 	submitForms := flags.Bool("forms", false, "submit POST forms (may change state; same-origin only)")
 	stored := flags.Bool("stored", false, "re-fetch known pages to detect stored/blind reflection")
+	verify := flags.Bool("verify", false, "validate supported credentials against provider APIs")
 	crawl := flags.Bool("crawl", false, "follow same-origin links on the seed page (depth 1)")
 	maxPages := flags.Int("max-pages", scan.DefaultMaxPages, "maximum pages fetched when crawling, seed included")
 	wordlistPath := flags.String("wordlist", "", "custom sensitive-path wordlist (capped at 200 entries)")
@@ -253,6 +255,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		EnableForms: *submitForms,
 		// Opt-in: extra requests, and the answer may be state a POST wrote.
 		EnableStored: *stored,
+		// Opt-in and third-party: only provider identity endpoints, read-only.
+		Verify: *verify,
 		// Opt-in: a crawl multiplies requests; the cap keeps it bounded.
 		EnableCrawl:       *crawl,
 		MaxPages:          *maxPages,
