@@ -1172,6 +1172,7 @@ reports evidence; it does not weaponise it.
 | `ceeb618` | feat(waf): detect firewalls and suppress block-page false positives | `internal/waf`, probe observer, reflection/path guards, report/TUI badge |
 | `fb75238` | feat(mining): widen surface with source maps and JSON responses | `js.SourceMapURL`/`ParseSourceMap`, `param.FromJSON`, 10 MiB map cap, second probe pass |
 | `65a064f` | feat(json): probe API parameters with JSON request bodies | `PostJSON`, `SubmitJSON`/`ProbeJSON`, `reflect.json`/`redirect.json`, `JSONProbes` |
+| `32997bc` | feat(roadmap): add CORS, CRLF, SSRF, prototype and parameter mining | `internal/{cors,crlf,ssrf,prototype,parammine}`, `-mine`, `Client.Wait`, pipeline stages |
 
 The rewrite in `fc86342` deleted the file-scanning API on purpose. If you find
 leftover references to `ScanPaths`, `Options.IncludeGeneric`, or a `pathPenalty`
