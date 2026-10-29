@@ -16,3 +16,8 @@ coverage.txt
 *.swp
 .DS_Store
 Thumbs.db
+
+# Agent and local instructions
+Instruction/
+.zwork/
+
