@@ -25,7 +25,7 @@ import (
 	"github.com/soliofski/SoliTools/internal/tui"
 )
 
-const version = "0.14.0"
+const version = "0.15.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -86,6 +86,7 @@ Flags for scan:
   -verify                 validate supported credentials against provider APIs
   -crawl                  follow same-origin links on the seed page (depth 1)
   -max-pages int          maximum pages fetched when crawling, seed included (default 10)
+  -mine                   mine hidden query parameters (extra requests; opt-in)
   -verbose                show the score derivation
   -quiet                  print only a one-line summary (CI mode)
   -width int              wrap output to this many columns (0 = detect)
@@ -154,6 +155,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	verify := flags.Bool("verify", false, "validate supported credentials against provider APIs")
 	crawl := flags.Bool("crawl", false, "follow same-origin links on the seed page (depth 1)")
 	maxPages := flags.Int("max-pages", scan.DefaultMaxPages, "maximum pages fetched when crawling, seed included")
+	mine := flags.Bool("mine", false, "mine hidden query parameters (extra requests; opt-in)")
 	wordlistPath := flags.String("wordlist", "", "custom sensitive-path wordlist (capped at 200 entries)")
 	verbose := flags.Bool("verbose", false, "show the score derivation")
 	quiet := flags.Bool("quiet", false, "print only a one-line summary")
@@ -260,6 +262,7 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 		// Opt-in: a crawl multiplies requests; the cap keeps it bounded.
 		EnableCrawl:       *crawl,
 		MaxPages:          *maxPages,
+		EnableMine:        *mine,
 		Wordlist:          wordlist,
 		WordlistTruncated: wordlistTruncated,
 		Progress:          live.Stage,

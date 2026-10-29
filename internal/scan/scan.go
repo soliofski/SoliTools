@@ -17,17 +17,22 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/soliofski/SoliTools/internal/cors"
 	"github.com/soliofski/SoliTools/internal/crawl"
+	"github.com/soliofski/SoliTools/internal/crlf"
 	"github.com/soliofski/SoliTools/internal/errgroup"
 	"github.com/soliofski/SoliTools/internal/finding"
 	"github.com/soliofski/SoliTools/internal/form"
 	"github.com/soliofski/SoliTools/internal/httpx"
 	"github.com/soliofski/SoliTools/internal/js"
 	"github.com/soliofski/SoliTools/internal/param"
+	"github.com/soliofski/SoliTools/internal/parammine"
 	"github.com/soliofski/SoliTools/internal/pathscan"
+	"github.com/soliofski/SoliTools/internal/prototype"
 	"github.com/soliofski/SoliTools/internal/redirect"
 	"github.com/soliofski/SoliTools/internal/reflect"
 	"github.com/soliofski/SoliTools/internal/secret"
+	"github.com/soliofski/SoliTools/internal/ssrf"
 	"github.com/soliofski/SoliTools/internal/verify"
 	"github.com/soliofski/SoliTools/internal/waf"
 )
@@ -81,6 +86,9 @@ type Options struct {
 	EnableCrawl bool
 	// MaxPages caps how many pages a crawl fetches, seed included.
 	MaxPages int
+	// EnableMine runs hidden-parameter mining against the seed. Off by default:
+	// it costs a burst of requests and is noisy on dynamic pages.
+	EnableMine bool
 	// Wordlist replaces the built-in sensitive-path list. It is already capped
 	// by pathscan.LoadWordlist.
 	Wordlist []string
@@ -147,6 +155,7 @@ type Stats struct {
 	Scripts           int            `json:"scripts"`
 	SourceMaps        int            `json:"source_maps,omitempty"`
 	JSONProbes        int            `json:"json_probes,omitempty"`
+	MinedParams       int            `json:"mined_params,omitempty"`
 	ThirdPartyScripts int            `json:"third_party_scripts"`
 	Endpoints         int            `json:"endpoints"`
 	Parameters        int            `json:"parameters"`
@@ -213,6 +222,18 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	result.Stats.Pages = len(fetched)
 
 	collected := &collector{byReason: make(map[string]int), stored: make(map[string][]reflect.Submission), notify: options.Notify}
+
+	// CORS is evaluated once, on the seed, before any state-changing work: it
+	// costs four Origin variants and can expose a cross-origin read of whatever
+	// the page already returns.
+	options.reportProgress("checking CORS")
+	if candidate, ok := cors.New(options.Client).Probe(ctx, cors.Target{
+		URL:     page.URL,
+		IsAPI:   looksLikeAPI(base.Path),
+		HasAuth: page.Header.Get("Set-Cookie") != "",
+	}); ok {
+		collected.addFinding(*candidate)
+	}
 	// The page body already contains every inline script, so scanning it once
 	// covers them; scanning them separately would double-count the same secret.
 	for _, current := range fetched {
@@ -290,6 +311,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				return nil
 			}
 			collected.addSecret(scanner.Scan(secret.Document{Source: scriptURL, Body: response.Body}))
+			if candidate, ok := prototype.AnalyzeScript(prototype.ScriptAnalysis{
+				URL: scriptURL, Content: string(response.Body),
+			}); ok {
+				collected.addFinding(*candidate)
+			}
 
 			// Endpoints discovered inside a bundle may themselves carry
 			// parameters, but only those on the script's own origin are useful.
@@ -367,6 +393,21 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		_ = mapGroup.Wait()
 	}
 
+	// Hidden-parameter mining is opt-in: it spends a burst of requests to learn
+	// names the page never linked, and a dynamic page makes it useless. An
+	// unstable baseline is a warning, not a failed scan.
+	if options.EnableMine {
+		options.reportProgress("mining hidden parameters")
+		discovered, mineErr := parammine.New(options.Client).Mine(ctx, page.URL, param.Names(target))
+		switch {
+		case mineErr != nil:
+			result.Warnings = append(result.Warnings, "parameter mining skipped: "+mineErr.Error())
+		case len(discovered) > 0:
+			collected.addParamNames(base, discovered, false)
+			result.Stats.MinedParams = len(discovered)
+		}
+	}
+
 	collected.addParams(target)
 	result.Stats.Forms = usedForms
 
@@ -388,6 +429,8 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	reflectAnalyzer := reflect.New(options.Client)
 	redirectAnalyzer := redirect.New(options.Client)
+	crlfAnalyzer := crlf.New(options.Client)
+	ssrfAnalyzer := ssrf.New(options.Client)
 	options.reportProgress("probing parameters")
 
 	// Watch probe responses for block pages. The observer is scoped to this
@@ -398,6 +441,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	probeGroup, probeCtx := errgroup.WithContext(ctx)
 	probeGroup.SetLimit(4)
 	var jsonProbes int64
+	var crlfProbes, ssrfProbes int32
+	const maxCRLFParams = 3
+	const maxSSRFParams = 3
 	for _, probe := range probes {
 		probe := probe
 		probeGroup.Go(func() error {
@@ -443,6 +489,25 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 						URL: probe.URL, Name: probe.Name,
 					}); ok {
 						collected.addFinding(redirected)
+					}
+				}
+			}
+			// CRLF and SSRF are expensive per parameter (5 and 3 requests), so
+			// they run only for the first few eligible targets, in interest order.
+			if !strings.EqualFold(probe.Method, http.MethodPost) {
+				if crlfEligible(probe) && atomic.AddInt32(&crlfProbes, 1) <= maxCRLFParams {
+					if candidate, ok := crlfAnalyzer.Probe(probeCtx, crlf.Target{URL: probe.URL, Param: probe.Name}); ok {
+						collected.addFinding(*candidate)
+					}
+					if candidate, ok := crlf.ProbeRaw(probeCtx, options.Client, probe.URL, probe.Name); ok {
+						collected.addFinding(*candidate)
+					}
+				}
+				if ssrf.IsSSRFParam(probe.Name) && atomic.AddInt32(&ssrfProbes, 1) <= maxSSRFParams {
+					if candidate, ok := ssrfAnalyzer.Probe(probeCtx, ssrf.Target{
+						BaseURL: probe.URL, Param: probe.Name, Method: probe.Method,
+					}); ok {
+						collected.addFinding(*candidate)
 					}
 				}
 			}
@@ -862,6 +927,16 @@ func (c *collector) takeJSONTargets(limit int, already map[string]struct{}) []pr
 
 func probeTargetKey(target probeTarget) string {
 	return target.Method + "|" + target.URL + "|" + target.Name
+}
+
+// crlfEligible limits header-injection probing to parameters whose value is
+// likely to reach a response header: high-interest names, redirect sinks and
+// JSON-mined fields.
+func crlfEligible(target probeTarget) bool {
+	if target.JSON {
+		return true
+	}
+	return param.Classify(target.Name) == param.High || redirect.IsRedirectParam(target.Name)
 }
 
 // looksLikeAPI decides whether a path is conventionally an API route. It is

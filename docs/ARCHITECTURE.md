@@ -1,6 +1,6 @@
 # SoliTools Architecture & Internal Specifications
 
-**Version:** `0.14.0` · **Design Philosophy:** Precision beats recall.
+**Version:** `0.15.0` · **Design Philosophy:** Precision beats recall.
 This document outlines the internal architecture, detection algorithms, module interactions, and design rationale for SoliTools.
 
 It covers what exists, why it is built this way, which traps will cost you time,
@@ -110,6 +110,7 @@ scripts and CI never get a half-interactive session.
 | `-verify` | off | validate supported credentials against provider APIs |
 | `-crawl` | off | follow same-origin seed links, depth one |
 | `-max-pages` | 10 | pages fetched when crawling, seed included |
+| `-mine` | off | mine hidden query parameters (extra requests) |
 | `-verbose` | off | print the score derivation and signals |
 | `-quiet` | off | one-line summary only; implies plain output |
 | `-width` | 0 | wrap to N columns; `0` detects the terminal |
@@ -175,7 +176,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 
 ```
 cmd/solitools      flags, banner, exit codes, wiring
-internal/scan      orchestrator: one target, six modules, dedupe
+internal/scan      orchestrator: one target, every detector, dedupe
 internal/httpx     the only place that performs I/O; rate limit, proxy, errors
 internal/errgroup  local subset of x/sync/errgroup (no external deps)
 internal/finding   shared result type; no printing
@@ -183,9 +184,14 @@ internal/confidence scoring model: base + signals, clamp, band
 internal/secret    credential detection
 internal/verify    read-only provider identity validation
 internal/waf       firewall and synthetic block detection
+internal/cors      CORS policy and origin bypass probing
+internal/crlf      header injection over httpx and raw ALPN sockets
+internal/ssrf      in-band differential SSRF heuristics
+internal/prototype lexical client-side prototype pollution
 internal/js        script triage + endpoint extraction
 internal/form      HTML form parsing, safety classification
 internal/crawl     depth-one same-origin link discovery
+internal/parammine hidden query parameter bisection
 internal/param     parameter classification
 internal/reflect   reflected-input canaries
 internal/redirect  open redirect verification
@@ -208,6 +214,11 @@ flowchart LR
     SECRET["internal/secret"]
     VERIFY["internal/verify"]
     WAF["internal/waf"]
+    CORS["internal/cors"]
+    CRLF["internal/crlf"]
+    SSRF["internal/ssrf"]
+    PROTO["internal/prototype"]
+    MINE["internal/parammine"]
     JS["internal/js"]
     FORM["internal/form"]
     CRAWL["internal/crawl"]
@@ -231,6 +242,11 @@ flowchart LR
     SCAN --> SECRET
     SCAN --> VERIFY
     SCAN --> WAF
+    SCAN --> CORS
+    SCAN --> CRLF
+    SCAN --> SSRF
+    SCAN --> PROTO
+    SCAN --> MINE
     REFLECT --> WAF
     PATH --> WAF
     SCAN --> JS
@@ -277,20 +293,25 @@ flowchart LR
 │   └── main_test.go           23 CLI tests against httptest servers
 └── internal/
     ├── confidence/            scoring model
+    ├── cors/                  CORS policy probing and origin bypass checks
     ├── crawl/                 depth-one same-origin link discovery
+    ├── crlf/                  header injection via httpx and raw ALPN socket
     ├── errgroup/              local x/sync subset
     ├── finding/               shared Finding type
     ├── form/                  form parsing, safety classification
     ├── httpx/                 the only I/O
-    ├── js/                    script triage, endpoint extraction
-    ├── param/                 parameter classification
+    ├── js/                    script triage, endpoint extraction, source maps
+    ├── param/                 parameter classification, JSON mining
+    ├── parammine/             hidden query parameter bisection
     ├── pathscan/              wordlist probing, soft-404
     ├── progress/              live status line
+    ├── prototype/             lexical client-side prototype pollution
     ├── redirect/              open redirect verification
     ├── reflect/               reflection canaries
     ├── report/                text, JSON, quiet, masking
     ├── scan/                  orchestrator + dedupe
     ├── secret/                rules, scanner, comments, context, entropy
+    ├── ssrf/                  in-band differential SSRF heuristics
     ├── verify/                read-only provider identity checks
     ├── waf/                   firewall and block-page classification
     ├── term/                  palette, TTY, width/height (windows + unix)
@@ -316,17 +337,24 @@ returning a clear error at runtime.
 ```mermaid
 flowchart TD
     START(["solitools scan URL"]) --> FETCH["httpx.Fetch<br/>follow up to 5 redirects"]
-    FETCH --> CRAWL["crawl.Links<br/>same origin, depth 1<br/>cap -max-pages"]
+    FETCH --> CORS["cors origins<br/>4 probes"]
+    CORS --> CRAWL["crawl.Links<br/>same origin, depth 1<br/>cap -max-pages"]
     CRAWL --> PAGE["per page: secret.Scan<br/>forms + endpoints"]
     PAGE --> SCRIPTS["js.ScriptURLs<br/>drop third-party hosts"]
     SCRIPTS --> FETCHJS["fetch up to 10 first-party bundles<br/>4 concurrent"]
     FETCHJS --> SEC2["secret.Scan<br/>each bundle"]
+    SEC2 --> PROTOTYPE["prototype.AnalyzeScript"]
     FETCHJS --> MAPS["fetch up to 5 same-origin maps<br/>scan sourcesContent"]
     MAPS --> ENDP["js.ExtractEndpoints"]
-    ENDP --> PARAMS["param.Names + JSON keys<br/>drops utm_ and fbclid"]
+    ENDP --> MINE["parammine<br/>when -mine"]
+    MINE --> PARAMS["param.Names + JSON keys<br/>drops utm_ and fbclid"]
     PARAMS --> PROBE["probe up to 10 parameters<br/>reflect + redirect"]
     PROBE --> JSONP["mine JSON + JSON body probes<br/>bounded second pass"]
+    PROBE --> CRLF["crlf query + raw<br/>top 3 params"]
+    PROBE --> SSRF["ssrf differential<br/>top 3 params"]
     JSONP --> STORED["reflect.Stored<br/>when -stored"]
+    CRLF --> STORED
+    SSRF --> STORED
     STORED --> PATHS["pathscan<br/>default 20 or custom list"]
     PATHS --> DEDUPE["dedupe + sort by confidence"]
     DEDUPE --> OUT(["scan.Result"])
@@ -851,6 +879,65 @@ Reporting: the text box, plain summary and quiet line carry a `WAF` badge with
 `[WAF: Provider]` in the monitor and explorer headers and a `WAF:` line in the
 detail panel.
 
+### 8.11 `cors` — misconfiguration, not a header grep
+
+`Probe(ctx, Target{URL, IsAPI, HasAuth})` sends at most four GETs, one per
+`Origin`: arbitrary `https://soli-<hex>.invalid`, `null`, suffix
+`https://<host>.soli-canary.invalid`, and subdomain
+`https://soli-check.<host>`. A variant is only evidence when ACAO reflects that
+exact origin (or `null`); the best accepted variant wins. Hard gates drop
+`ACAO: *` + `ACAC: true` (browsers reject it), static assets with uncredentialed
+reflection, and 4xx/5xx uncredentialed responses. Base 65 credentialed / 25
+uncredentialed; the §5.1.4 signals carry exact names and reasons. The module
+returns medium scores so `-all` can show them; the report filters. It runs once
+per scan, immediately after the seed fetch.
+
+### 8.12 `crlf` — headers, not body text
+
+Two entry points. `Analyzer.Probe` sends four encoded newline variants through
+httpx and inspects only `resp.Header`; `ProbeRaw` opens a raw TCP/TLS connection
+(ALPN `http/1.1`, certificate verification on), writes the request itself and
+parses the reply with `textproto`. Both first consume `Client.Wait(ctx)` so raw
+connections share the token bucket. The only hard gate is location: a canary
+that appears in the body but not in parsed headers is dropped, which is the
+false positive the module exists to prevent. Base 50; +30 parsed header, +25
+Set-Cookie, +25 second status line, +15 double encoding; −20 400/431, −25
+sanitised. Raw probing ignores `-proxy`, documented in README.
+
+### 8.13 `ssrf` — differential evidence without callbacks
+
+`Probe(ctx, Target{BaseURL, Param, Method})` runs only for the taxonomy in
+`IsSSRFParam` and issues exactly three requests: baseline, loopback
+`http://127.0.0.1:65530/soli-probe`, and `http://192.0.2.1/soli-probe`. The tool
+never dials those addresses; the target may. Base 40; +35 leaked backend error, and +25 SYN latency delta (default 3s,
+configurable so tests stay fast), +15 gateway
+status shift, +10 exact high-value name; −20 WAF page, −15 bare 404. Identical
+baseline/loopback responses are dropped; `202 Accepted` becomes an informative
+async sink rather than a false negative. A ~6s context bounds the SYN probe.
+
+### 8.14 `prototype` — lexical, no browser
+
+`AnalyzeScript({URL, Content, IsThirdParty})` masks comments and string
+literals (two views), finds `for…in` loops that assign `target[key]`, and
+rejects them when the local 250-character scope filters `__proto__`,
+`constructor`, `prototype`, `hasOwnProperty` (including `.call`),
+`Object.create(null)` or explicit key comparisons. `Object.freeze` is a gate
+when it precedes the sink. Base 50; unpatched lodash (<4.17.12) or deparam +25,
+location source +20, gadget +15, unvalidated postMessage +15, and JSON
+reflection +10 (with evidence), minification −15, no gadget −10. RE2 has no
+backreferences, so the loop key
+is captured once and quoted into the assignment pattern. No network I/O.
+
+### 8.15 `parammine` — hidden parameters by bisection
+
+`Mine(ctx, url, existing)` requests the target twice and refuses to continue
+unless status, body length and body hash match. It appends a curated name
+list in chunks of 25, bisects any chunk whose response changes, and returns the
+isolated names. `MaxRequests` bounds the run; `existing` and names already in
+the URL are skipped; cancellation returns the context error rather than a
+partial list. The pipeline calls it only with `-mine` and feeds discovered names
+back into the parameter pool, where `MaxParams` still caps active probing.
+
 ---
 
 ## 9. Rendering
@@ -891,7 +978,7 @@ Rules that must survive future edits:
 
 ## 10. Testing
 
-243 test functions. The distribution matters more than the number:
+343 test functions. The distribution matters more than the number:
 
 | Package | Focus |
 |---------|-------|
@@ -907,12 +994,17 @@ Rules that must survive future edits:
 | `reflect` (18) | context classification, POST bodies, escaped reflection rejected, stored pass, JSON body probes |
 | `redirect` (12) | external verified, internal ignored, echo ignored, every payload style, JSON body probes |
 | `pathscan` (9) | status filter, soft-404, catch-all host, wordlist loading and cap, block-page guard |
-| `scan` (23) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining, JSON body probing |
+| `scan` (28) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining, JSON body probing, CORS/CRLF/SSRF/prototype/mining stages |
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (27) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering, WAF badge |
 | `verify` (9) | five provider shapes, active/revoked/skipped, timeout, redirect refusal, input immutability, no token in fields |
 | `waf` (4) | every provider's headers and body signatures, generic block heuristics, duplicate Server headers, block-vs-presence |
+| `cors` (25) | origin reflection, null/suffix/subdomain trust, credential and static-asset gates, scoring |
+| `crlf` (21) | four encodings, header-only gate, raw socket parsing, response splitting, rate-limit wait |
+| `ssrf` (12) | taxonomy gate, error leak, status shift, latency differential, 202 async, WAF/404 negatives |
+| `parammine` (18) | stable baseline, chunk diff, bisection, budget, existing-name exclusion |
+| `prototype` (19) | merge sink, local guards, patched/unpatched lodash, freeze, gadgets, postMessage |
 
 Test doubles are `httptest.NewServer` — no network, no fixtures on disk. The
 pipeline test (`internal/scan/scan_test.go`) serves a page with a token, a
@@ -950,6 +1042,11 @@ hosts.
 | A source map is only fetched same-origin, at most five per run | `TestSourceMapURLRejectsOtherOrigins`, `TestRunMinesSourceMaps` |
 | A malformed map is skipped, never fatal | `TestParseSourceMapRejectsBadInput`, `TestRunSkipsMalformedSourceMap` |
 | JSON mining stops at depth three and never recurses | `TestFromJSONRespectsDepth`, `TestRunMinesJSONFromProbeResponse` |
+| A CORS finding needs a reflected origin and a passing gate | `TestProbeCredentialedArbitraryOriginReflection`, `TestProbeDropsWildcardWithCredentials` |
+| CRLF evidence must be a parsed header, never body text | `TestProbeIgnoresBodyOnlyReflection`, `TestProbeRawDetectsHeaderOnly` |
+| SSRF probes never contact anything but the target | `TestProbeDetectsNetworkErrorLeak`, `TestProbeGatewayStatusShiftScoresMedium` (httptest only) |
+| A patched lodash is never reported as vulnerable | `TestAnalyzeScriptIgnoresPatchedLodash` |
+| Mining refuses an unstable baseline | `TestMineRejectsUnstableBaseline` |
 | A JSON finding never collapses into a query finding on the same URL | `TestRunProbesJSONBodiesOnAPIRoutes` |
 | JSON probes obey the WAF block guard | `TestProbeJSONSuppressesWAFBlockPage` (reflect), `TestProbeJSONSuppressesWAFBlockPage` (redirect) |
 | A nested JSON candidate keeps its path | `TestProbeJSONNestsMinedPath`, `TestFromJSONFieldsKeepsPaths` |
@@ -1003,6 +1100,7 @@ hosts.
 | done | ~~WAF and block detection~~ | Shipped in 0.12.0: passive provider detection, interception warning after three blocks, and block-page guards in reflection and path scanning. |
 | done | ~~Parameter mining from source maps and JSON responses~~ | Shipped in 0.13.0: same-origin v3 maps (five per run, 10 MiB cap) feeding endpoints, secrets and route bindings; JSON keys mined to depth three with a bounded second probe pass. |
 | done | ~~JSON body probing~~ | Shipped in 0.14.0: `PostJSON`, canaries and redirect payloads in JSON bodies for `/api/` and mined parameters, `POST (JSON)` findings under their own rule ids, WAF guard intact. |
+| done | ~~CORS, CRLF, SSRF, prototype pollution, parameter mining~~ | Shipped in 0.15.0: `internal/cors`, `internal/crlf` (raw ALPN), `internal/ssrf` (in-band differential), `internal/prototype` (lexical), `internal/parammine` (`-mine`), each wired with bounded request budgets. |
 | 1 | **Authenticated scanning** | A session file (cookies, headers) would unlock logged-in surface, but it changes the tool from observer to user; needs a design decision and a scope guard. |
 | 2 | **DOM XSS analysis** | The bundles are already fetched; tracing sources to sinks is a new detection model and should stay separate from the canary probe. |
 
@@ -1014,8 +1112,9 @@ reports evidence; it does not weaponise it.
 ## 14. Known limitations (be honest about these)
 
 - Single page by default; `-crawl` adds depth-one same-origin pages, seed
-  included in the `-max-pages` cap. `GET` by default; POST only for forms
-  behind `-forms`. No JSON bodies, no cookies beyond `-cookie`.
+  included in the `-max-pages` cap. `GET` is the default; POST bodies are sent
+  only for forms behind `-forms` and for JSON probes on `/api/` or mined
+  parameters. No cookies beyond `-cookie`.
 - Stored reflection is observed once, later in the same run, and only on pages
   the scan already knows. No out-of-band blind detection, no DOM XSS analysis
   (the `js` module extracts endpoints, it does not execute or symbolically
@@ -1032,6 +1131,11 @@ reports evidence; it does not weaponise it.
 - Mining is bounded: five maps per run at 10 MiB, JSON depth three, and five
   second-pass parameters. A map behind a CDN or in a non-standard format is
   skipped rather than guessed at.
+- CORS adds four requests to every scan. CRLF raw probes ignore `-proxy`, SSRF
+  latency evidence only applies to synchronous loops, and `-mine` needs a
+  stable baseline or reports a warning instead of guessing.
+- Prototype pollution detection is lexical: it reports sinks and evidence, not
+  a working exploit, and minification can hide both.
 - JSON body probing covers `/api/` routes and parameters mined from JSON or source
   maps, with one body shape per parameter. A schema that requires sibling fields
   may return 400/415 and is left alone rather than guessed at.

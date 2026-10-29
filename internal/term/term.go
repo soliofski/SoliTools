@@ -130,6 +130,14 @@ func KindColor(kind string) string {
 		return "redirect"
 	case "PATH":
 		return "path"
+	case "CORS":
+		return "warning"
+	case "CRLF":
+		return "critical"
+	case "SSRF":
+		return "critical"
+	case "PROTOTYPE":
+		return "high"
 	default:
 		return "muted"
 	}

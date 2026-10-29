@@ -84,6 +84,7 @@ usage or runtime error.
 | `-verify` | off | validate supported credentials against provider identity APIs |
 | `-crawl` | off | follow same-origin links on the seed page (depth 1) |
 | `-max-pages` | 10 | maximum pages fetched when crawling, seed included |
+| `-mine` | off | mine hidden query parameters (extra requests) |
 | `-verbose` | off | print the score derivation |
 | `-json` | off | machine-readable report |
 | `-sarif` | off | SARIF 2.1.0 log for code scanning (excludes `-json`) |
@@ -339,6 +340,13 @@ noise do not. Names found in a probe response arrive after the parameter
 snapshot, so they are probed in one bounded second pass (five targets) and are
 never recursed.
 
+**Hidden parameter mining.** `-mine` is an opt-in discovery pass: the seed is
+requested twice to prove a stable baseline, then a curated list of common hidden
+names is appended in chunks of 25. A chunk whose response shifts is bisected
+recursively, so a single hidden `debug` or `admin` parameter is isolated without
+probing all 500 names one by one. The pass is bounded by a request budget and
+refuses to guess when the baseline is dynamic.
+
 ### form — parameters that never appear in a URL
 
 A URL-only scanner sees nothing of a form. `internal/form` parses `<form>`
@@ -415,6 +423,57 @@ body. The same `Location` verification applies, findings carry
 `Method: POST (JSON)` and rule id `redirect.json`, and a WAF block page is
 ignored before the redirect is examined.
 
+### cors — CORS misconfiguration
+
+Four `Origin` variants are tried against the seed: an arbitrary
+`soli-<hex>.invalid`, `null`, a suffix bypass (`target.com.soli-canary.invalid`)
+and an arbitrary subdomain. A response counts only when it reflects the tested
+origin (or `null`) in `Access-Control-Allow-Origin`. Hard gates drop the
+browser-rejected `*` + credentials combination, static assets with uncredentialed
+reflection, and 4xx/5xx uncredentialed responses. Scoring starts at 65 with
+credentials or 25 without; arbitrary reflection adds 15/20, null +10,
+suffix +15, subdomain +10, sensitive JSON +15, auth cookies +10, exposed sensitive
+headers +10; errors −30, public caching −15, empty body −15, login page −20.
+Uncredentialed reflections therefore stay below the default threshold and are
+visible only with `-all`. Costs at most four requests per scan.
+
+### crlf — HTTP header injection
+
+Two paths, both gated on the response **header section**: four percent-encoded
+newline variants (`\r\n`, `\n`, `\r`, double-encoded) are sent as a query value
+through `httpx`, then a raw HTTP/1.1 request over `net.Dial`/TLS with ALPN
+`http/1.1` carries a literal CRLF payload and parses the reply with
+`textproto`. A reflection in the body alone is never a finding — that is the
+false positive this module exists to avoid. A parsed `X-SoliTools-Canary`
+header scores +30 over a base of 50; Set-Cookie +25, a second status line +25,
+double-encoding +15; 400/431 −20, sanitised value −25. Raw probes ignore
+`-proxy` but consume the shared rate limiter first. Probe cost: five requests
+per eligible parameter, capped at three parameters per scan.
+
+### ssrf — in-band differential heuristics
+
+Only parameters in the SSRF taxonomy are tested (`url`, `webhook`, `callback`,
+`feed`, `proxy`, …). Exactly three requests per parameter: baseline, loopback
+`127.0.0.1:65530` (expected RST), and `192.0.2.1` (RFC 5737, expected SYN
+timeout). Signals: leaked backend error +35, latency delta >3s +25, 502/504
+status shift +15, exact high-value name +10; WAF block −20, bare 404 −15. Base
+is 40, so a status shift alone stays at 55 (hidden by default). Identical
+baseline/loopback responses are dropped; a `202 Accepted` on a high-interest
+parameter is reported as an informative asynchronous sink instead of a false
+negative. No out-of-band callback is ever used.
+
+### prototype — client-side prototype pollution
+
+Lexical, AST-free analysis of first-party bundles: it looks for `for…in` merge
+loops assigning `target[key]`, rejects loops whose local scope filters
+`__proto__`/`constructor`/`prototype` (including `hasOwnProperty.call`),
+`Object.create(null)` and key comparisons, and recognises frozen prototypes.
+Evidence raises the 50-point base: unpatched lodash <4.17.12 or vulnerable
+deparam +25, `location.search`/`hash` source +20, DOM gadget +15, unvalidated
+`postMessage` +15, server-side JSON reflection +10; minified uncertainty −15
+when a loop is present, no gadget −10. Patched lodash is never reported for the
+library signature. No network requests; runs on every fetched bundle.
+
 ### path — sensitive paths
 
 A short, high-value wordlist (`.env`, `.git/config`, `.aws/credentials`,
@@ -476,8 +535,14 @@ stored by a form on one page is found on a listing page.
   out-of-band listener and is out of scope.
 - Path scanning uses the built-in 26-entry wordlist (first 20 by default), or
 a custom file capped at 200 entries.
-- `GET` is the default; bodies are submitted only for POST forms behind
-  `-forms`. JSON bodies are never sent.
+- `GET` is the default; POST bodies are sent only for forms behind `-forms` and
+  for JSON probes on `/api/` or mined parameters.
+- CORS probing adds up to four requests to every scan. CRLF raw probes ignore
+  `-proxy` (though they still take a token from the shared limiter), SSRF
+  latency evidence only works for synchronous request loops, and `-mine` needs
+  a stable baseline or it reports a warning instead of guessing.
+- Prototype pollution detection is lexical: it finds vulnerable sinks and
+  evidence, not a working exploit, and a heavily minified bundle can hide either.
 - Crawling is depth one, opt-in and capped at 10 pages including the seed.
 - Third-party detection uses a small public-suffix table, not the full PSL.
 - Low-entropy real tokens are rejected by design; precision beats recall.

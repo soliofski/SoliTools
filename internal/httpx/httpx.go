@@ -167,6 +167,13 @@ type Client struct {
 // uses it to state the real cost of a run.
 func (c *Client) Requests() int64 { return c.requests.Load() }
 
+// Wait consumes one slot from the shared rate limiter without issuing a
+// request. The CRLF raw-socket prober uses it so its connections stay inside
+// the same budget as every httpx request.
+func (c *Client) Wait(ctx context.Context) error {
+	return c.limiter.Wait(ctx)
+}
+
 // SetObserver installs a callback that runs for every completed response. The
 // scan uses it to count WAF block pages without threading a response return
 // value through every module. Callbacks run concurrently with the requests that
