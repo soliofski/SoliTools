@@ -1,8 +1,8 @@
 # SoliTools
 
 [![CI](https://github.com/soliofski/SoliTools/actions/workflows/ci.yml/badge.svg)](https://github.com/soliofski/SoliTools/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/soliofski/SoliTools?color=brightgreen)](https://github.com/soliofski/SoliTools/releases)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/soliofski/SoliTools)](https://go.dev/)
+[![Release](https://img.shields.io/badge/Release-v0.15.1-brightgreen)](https://github.com/soliofski/SoliTools/releases)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 High-accuracy web security scanner in Go, built for penetration testing and bug
