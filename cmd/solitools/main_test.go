@@ -363,7 +363,9 @@ func TestWordlistFlagIsUsed(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.hidden" {
-			w.Write([]byte("<html><body>reachable</body></html>"))
+			// A dotfile is plain text; an HTML shell for one is now rejected.
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte("SOLI_ENV=staging\n"))
 			return
 		}
 		if r.URL.Path == "/" {

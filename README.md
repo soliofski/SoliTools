@@ -479,9 +479,28 @@ library signature. No network requests; runs on every fetched bundle.
 
 A short, high-value wordlist (`.env`, `.git/config`, `.aws/credentials`,
 `id_rsa`, backups, `actuator`, `swagger-ui.html`, …). Only `200`, `401` and
-`403` are considered. Soft 404s are filtered against a random baseline with a
-size comparison sized relative to the page, default server pages are discarded,
-and 200 responses score higher than 403s.
+`403` are considered, default server pages are discarded, and 200 responses
+score higher than 403s.
+
+A `200` is never evidence by itself. Single-page apps and CDN catch-alls answer
+every unknown path with the same HTML shell, so three layers stand between that
+shell and a finding:
+
+- **The baseline is retried.** Three fresh random paths with backoff, and WAF
+  challenge pages are refused as samples. If every attempt fails the scan warns
+  instead of assuming `404`, and only content-proven files are reported.
+- **The body must be the file it names.** `.env` needs `KEY=value` lines,
+  `id_rsa`/`*.pem` a `BEGIN … PRIVATE KEY` header, `.git/HEAD` a `ref: refs/`
+  or an object id, `.git/config` and `.aws/credentials` INI sections, zips the
+  `PK` magic, `.DS_Store` `Bud1`, compose files a YAML root key. An HTML
+  document is never a credential file. Page-like paths such as `/admin` or
+  `phpinfo.php` are still allowed to be HTML.
+- **Catch-all hosts only report proof.** If a random path answers `200`, then a
+  `200` without a content signature is a soft 404, not a finding. `401`/`403`
+  are still reported, because a protected path is real information.
+
+Suppressions are counted, and a cluster of them produces one warning naming the
+catch-all router rather than failing silently.
 
 `-wordlist` replaces that list with a file: one path per line, blank lines and
 `#` comments ignored, duplicates dropped, leading slashes trimmed. It is capped
@@ -535,7 +554,10 @@ stored by a form on one page is found on a listing page.
   scan re-fetches known pages once, later in the run; truly blind XSS needs an
   out-of-band listener and is out of scope.
 - Path scanning uses the built-in 26-entry wordlist (first 20 by default), or
-a custom file capped at 200 entries.
+  a custom file capped at 200 entries. Catch-all hosts are suppressed unless the
+  body proves the file, so a genuine exposure with no recognizable signature
+  behind a 200-for-everything router is counted in the warning, not reported as
+  a finding.
 - `GET` is the default; POST bodies are sent only for forms behind `-forms` and
   for JSON probes on `/api/` or mined parameters.
 - CORS probing adds up to four requests to every scan. CRLF raw probes ignore

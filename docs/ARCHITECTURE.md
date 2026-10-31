@@ -1,6 +1,6 @@
 # SoliTools Architecture & Internal Specifications
 
-**Version:** `0.15.0` · **Design Philosophy:** Precision beats recall.
+**Version:** `0.15.1` · **Design Philosophy:** Precision beats recall.
 This document outlines the internal architecture, detection algorithms, module interactions, and design rationale for SoliTools.
 
 It covers what exists, why it is built this way, which traps will cost you time,
@@ -166,7 +166,7 @@ $ solitools scan -quiet -rate 50 https://target.example/
 | 9 | Box borders drift | Widths measured in **bytes**; `·` is 2 bytes but 1 column | All box geometry uses `runeLen` |
 | 10 | Animation corrupts redirected output | `-color=always \| file` would write `\r` and clear-line codes | Animation requires a real TTY (`term.IsTerminal`), independent of colour mode |
 | 11 | URLs get hard-wrapped | A split URL cannot be copied into a browser | `URL` rows are exempt from wrapping |
-| 12 | Soft-404 filter too loose | A 512-byte absolute tolerance treats any tiny page as the catch-all | `similarSize` is relative with a 200-byte scale floor |
+| 12 | Catch-all hosts look like findings | A single random-path baseline that failed (reset, timeout, challenge page) was read as `404`, so every 200 became a sensitive path | The baseline is retried over fresh random paths with backoff, WAF challenge pages are refused as samples, and an unusable baseline becomes a warning instead of an assumption. Pinned by `TestProbeSurvivesBaselineTransportFailure` |
 | 13 | RE2 rejects nested counted repetition | `(?:a{1,2}b){0,10}` compiles, but `(?:[a-z]{2,4}=[^&]{0,200}&){0,10}` fails with `invalid repeat count` | Flatten to one character class with a single bounded repeat, as `secret.azure-sas-token` does |
 | 14 | VT input splits arrow keys | With `ENABLE_VIRTUAL_TERMINAL_INPUT` set, Windows translates arrows to `ESC [ A/B`, and `ReadConsoleInputW` hands the trailing `[A`/`[B` back as printable runes | Keep VT input **off**; key records already carry `VK_UP`/`VK_DOWN`. Pinned by `TestRawInputModeClearsVTInput` |
 
@@ -754,9 +754,30 @@ blank lines and `#` comments, removes duplicates, trims leading slashes, and
 caps at `MaxCustomWords` (200) with a `truncated` flag that surfaces as a scan
 warning. A custom list is used in full — the 20-entry default budget applies
 only to the built-in list. Only `200`, `401`,
-`403` count. A random baseline detects catch-all hosts by comparing body size
-relative to the page (with a 200-byte scale floor). Default server pages are
-discarded. `200` outranks `403`.
+`403` count. Default server pages are discarded, and `200` outranks `403`.
+
+A 200 is never evidence on its own. Single-page apps answer every unknown path
+with the same HTML shell, so the module uses three layers:
+
+1. **Baseline with retries.** `baseline()` tries three fresh random paths with
+   100 ms/200 ms backoff and refuses WAF challenge pages as samples. It returns
+   a `baselineSample` with `known=false` when every attempt fails; callers must
+   never read that as `404`. `Probe` turns it into a warning.
+2. **Content signatures.** `assessContent` decides whether the body can be the
+   file the path names: `KEY=value` lines for `.env`, `BEGIN … PRIVATE KEY` for
+   `id_rsa`/`*.pem`, `ref: refs/` or an object id for `.git/HEAD`, `[core]` /
+   `repositoryformatversion` for `.git/config`, an INI section with
+   `aws_access_key_id` for `.aws/credentials`, `PK` magic for zips, `Bud1` for
+   `.DS_Store`, a YAML root key for compose files. HTML is rejected outright for
+   any data file, while page-like paths (`/admin`, `.php`) may be HTML.
+   The word-shape test (`isDataFile`) applies to custom wordlists too.
+3. **Catch-all suppression.** If the baseline answers `200`, the host serves
+   the same document for paths that cannot exist; a 200 without content proof is
+   then a soft 404, not a finding. `401`/`403` still count, because a protected
+   path is real information.
+
+Every suppression has a `suppression` reason, and three or more catch-all or
+content rejections produce one warning naming the router instead of silence.
 
 ### 8.8 `tui` — interactive front end
 
@@ -993,8 +1014,8 @@ Rules that must survive future edits:
 | `param` (10) | classification, noise removal, JSON key mining, depth and paths |
 | `reflect` (18) | context classification, POST bodies, escaped reflection rejected, stored pass, JSON body probes |
 | `redirect` (12) | external verified, internal ignored, echo ignored, every payload style, JSON body probes |
-| `pathscan` (9) | status filter, soft-404, catch-all host, wordlist loading and cap, block-page guard |
-| `scan` (28) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining, JSON body probing, CORS/CRLF/SSRF/prototype/mining stages |
+| `pathscan` (13) | status filter, catch-all and soft-404 suppression, baseline retries and warnings, HTML rejected for data files, real signatures accepted, wordlist loading and cap, block-page guard |
+| `scan` (29) | full pipeline, form opt-in, cross-origin rejection, crawl depth and filters, stored observation, custom wordlist, verify opt-in, WAF detection and interception, source map and JSON mining, JSON body probing, CORS/CRLF/SSRF/prototype/mining stages, catch-all path suppression |
 | `confidence` (11) | bands, clamping, rounding, NaN, trace immutability, post-hoc adjust |
 | `progress` (6) | render format, silence without a TTY, concurrency safety |
 | `tui` (27) | key decoding (VT and VK), raw-mode flags, form bounds and toggles, list scrolling, masking, frame rendering, WAF badge |
@@ -1044,6 +1065,8 @@ hosts.
 | JSON mining stops at depth three and never recurses | `TestFromJSONRespectsDepth`, `TestRunMinesJSONFromProbeResponse` |
 | A CORS finding needs a reflected origin and a passing gate | `TestProbeCredentialedArbitraryOriginReflection`, `TestProbeDropsWildcardWithCredentials` |
 | CRLF evidence must be a parsed header, never body text | `TestProbeIgnoresBodyOnlyReflection`, `TestProbeRawDetectsHeaderOnly` |
+| A catch-all SPA never floods the path wordlist | `TestProbeSurvivesBaselineTransportFailure`, `TestRunSuppressesSPAPathFlood` |
+| An HTML shell is never a credential file | `TestEvaluateRejectsHTMLForSensitiveFiles` |
 | SSRF probes never contact anything but the target | `TestProbeDetectsNetworkErrorLeak`, `TestProbeGatewayStatusShiftScoresMedium` (httptest only) |
 | A patched lodash is never reported as vulnerable | `TestAnalyzeScriptIgnoresPatchedLodash` |
 | Mining refuses an unstable baseline | `TestMineRejectsUnstableBaseline` |

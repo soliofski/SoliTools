@@ -19,7 +19,7 @@ func TestEvaluateRejectsWAFBlockPages(t *testing.T) {
 		Header: header,
 		Body:   []byte("<html><title>Attention Required! | Cloudflare</title></html>"),
 	}
-	if _, ok := evaluate(".env", "https://target.test/.env", response, http.StatusNotFound, 0); ok {
+	if _, ok := evaluate(".env", "https://target.test/.env", response, baselineSample{status: http.StatusNotFound}); ok {
 		t.Fatal("a WAF block page must not be reported as a reachable path")
 	}
 }
@@ -42,13 +42,20 @@ func TestEvaluate(t *testing.T) {
 		{"not found", "admin", response(404, "nope"), 404, 0, false},
 		{"redirect is not a hit", "admin", response(302, ""), 404, 0, false},
 		{"default server page", "admin", response(200, "<title>404 Not Found</title>"), 404, 0, false},
-		{"soft 404 catch-all", ".env", response(200, "same body"), 200, 9, false},
-		{"larger page under catch-all", ".env", response(200, "a much longer body than the baseline"), 200, 9, true},
+		{"soft 404 catch-all", "admin", response(200, "same body"), 200, 9, false},
+		// On a host that answers 200 for a random path, a 200 page is a soft 404
+		// unless the body proves what it is.
+		{"page under catch-all", "admin", response(200, "a much longer body than the baseline"), 200, 9, false},
+		{"signed file under catch-all", ".env", response(200, "DB_HOST=db.internal"), 200, 9, true},
+		// An HTML shell is never a credential file, whatever the baseline says.
+		{"html shell for env", ".env", response(200, "<!DOCTYPE html><html><body>app</body></html>"), 404, 0, false},
+		{"env without assignments", ".env", response(200, "not a dotenv file"), 404, 0, false},
+		{"private key without header", "id_rsa", response(200, "some text"), 404, 0, false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, ok := evaluate(c.word, "https://target.test/"+c.word, c.response, c.baseStatus, c.baseSize)
+			_, ok := evaluate(c.word, "https://target.test/"+c.word, c.response, baselineSample{status: c.baseStatus, size: c.baseSize, known: true})
 			if ok != c.want {
 				t.Fatalf("evaluate = %v, want %v", ok, c.want)
 			}

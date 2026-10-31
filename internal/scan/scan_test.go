@@ -421,7 +421,10 @@ func TestRunUsesCustomWordlist(t *testing.T) {
 		case "/":
 			w.Write([]byte("<html><body>home</body></html>"))
 		case "/.hidden":
-			w.Write([]byte("<html><body>a reachable secret file</body></html>"))
+			// A real dotfile is plain text, not an HTML page: the path module now
+			// rejects HTML shells served for data files.
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte("SOLI_ENV=staging\n"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1181,6 +1184,46 @@ func TestRunMinesHiddenParametersWhenEnabled(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the mined parameter was not probed: %+v", result.Findings)
+	}
+}
+
+func TestRunSuppressesSPAPathFlood(t *testing.T) {
+	// A catch-all SPA whose random baseline path is dropped at the transport
+	// level used to report every wordlist entry as a sensitive file.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/soli-") {
+			panic(http.ErrAbortHandler)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, "<!DOCTYPE html><html><head><title>Orchid Labs</title></head><body><div id=root></div></body></html>")
+	}))
+	defer server.Close()
+
+	client, err := httpx.New(httpx.Options{Rate: 500})
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	result, err := Run(context.Background(), Options{
+		Target:       server.URL + "/",
+		Client:       client,
+		MaxPathWords: 8,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, candidate := range result.Findings {
+		if candidate.Kind == finding.KindPath {
+			t.Fatalf("catch-all host produced a path finding: %s %v", candidate.URL, candidate.Confidence.Value)
+		}
+	}
+	warned := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "baseline") || strings.Contains(warning, "catch-all") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("no warning about the unusable baseline: %v", result.Warnings)
 	}
 }
 
