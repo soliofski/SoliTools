@@ -111,7 +111,8 @@ interface over the same engine:
    and module badges; the detail panel shows URL, parameter, rule, category,
    value, context and the full score derivation. `m` toggles masking for the
    selected finding, `s` saves a JSON or SARIF report (secrets stay masked on
-   disk), `q` exits.
+   disk), `r`/`d` re-scan the selected finding's URL, `b` returns to the
+   previous scan (or the form), and `q` exits.
 
 The TUI draws on the alternate screen buffer, so the user's scrollback survives,
 and hides the cursor while it owns the terminal. It requires a real terminal on

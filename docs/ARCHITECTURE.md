@@ -772,7 +772,7 @@ Three screens, one state machine:
 |--------|-------|-------|
 | Configure | `Form`: target text + cursor, five checkboxes, threshold radio, rate and page numbers | arrows, space, left/right, digits, enter, esc |
 | Monitor | stage, elapsed, requests, measured rate, per-band finding counts | esc / ctrl+c cancels the scan context |
-| Explorer | `ResultView`: threshold-filtered list, cursor, scroll offset, mask overrides | arrows, j/k, pgup/pgdn, home/end, m, s, q |
+| Explorer | `ResultView`: threshold-filtered list, cursor, scroll offset, mask overrides | arrows, j/k, pgup/pgdn, home/end, m, s, r/d (rescan), b (back), q |
 
 The form and the explorer are pure structs with pure methods, which is why the
 tests can cover bounds, toggles, scrolling and masking without a console.

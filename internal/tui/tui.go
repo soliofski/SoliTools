@@ -69,6 +69,9 @@ type app struct {
 	spinner  int
 	saving   bool
 	savePath string
+	// history is the navigation stack for 'b': each rescan pushes the outcome
+	// it replaced, so going back restores the exact result and its view.
+	history []scanOutcome
 }
 
 // Run takes over the terminal, drives the UI and restores everything on exit.
@@ -364,6 +367,28 @@ func (a *app) handleResults(event Event) bool {
 			a.saving = true
 			a.savePath = "solitools-report.json"
 			a.notice = ""
+		case 'r', 'd':
+			// Rescan the selected finding's URL. The current outcome is pushed
+			// before startScan resets it, so 'b' can come back here.
+			if selected, ok := a.view.SelectedFinding(); ok && selected.URL != "" {
+				a.history = append(a.history, scanOutcome{result: a.result, err: a.runErr})
+				a.form.Target = selected.URL
+				a.startScan()
+			}
+		case 'b':
+			if len(a.history) == 0 {
+				a.screen = screenForm
+				a.notice = ""
+				return false
+			}
+			previous := a.history[len(a.history)-1]
+			a.history = a.history[:len(a.history)-1]
+			a.result = previous.result
+			a.runErr = previous.err
+			a.waf = previous.result.WAF
+			a.view = NewResultView(previous.result, a.form.ThresholdValue(), a.form.Mask)
+			a.screen = screenResults
+			a.notice = ""
 		}
 	}
 	return false
@@ -635,7 +660,7 @@ func (a *app) renderResults(frame *strings.Builder) {
 	if a.notice != "" {
 		a.line(frame, a.cfg.Theme.Color("warning", a.notice))
 	}
-	a.line(frame, a.dim("↑/↓ j/k scroll   pgup/pgdn page   m mask   s save   q quit"))
+	a.line(frame, a.dim("↑/↓ j/k scroll   r rescan   b back   m mask   s save   q quit"))
 }
 
 func (a *app) renderDetail(frame *strings.Builder) {
