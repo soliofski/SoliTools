@@ -46,30 +46,9 @@ go build -o solitools ./cmd/solitools
 ./solitools scan -rate 50 https://target.example/
 ```
 
-### 2.1 This machine has a Go environment quirk — read this
+### 2.1 Verification gate (run before every commit)
 
-`LOCALAPPDATA` is empty in this environment, so Go reports `GOCACHE=off` and
-**every** `go` command fails with:
-
-```
-build cache is required, but could not be located: GOCACHE is not defined
-```
-
-Always prefix Go commands with a cache path:
-
-```powershell
-$env:GOCACHE="$env:TEMP\solitools-gocache"
-go test ./...
-```
-
-Do not "fix" this by editing the user's environment permanently; set it per
-shell. A build that silently failed and then ran a stale `solitools.exe` has
-already happened once here.
-
-### 2.2 Verification gate (run before every commit)
-
-```powershell
-$env:GOCACHE="$env:TEMP\solitools-gocache"
+```console
 gofmt -l .          # must print nothing
 go vet ./...        # must be silent
 go test -count=1 ./...
@@ -79,13 +58,7 @@ go test -count=1 ./...
 `go test ./internal/secret -count=10` when you touch key material, comment
 detection, or gates: some failures only appear for certain random keys.
 
-### 2.3 Git
-
-- Repo-local identity: `Soliofski <Soliofski@users.noreply.github.com>`.
-- Commit style: `feat: …`, `feat(ui): …`, with a body explaining *why*.
-- The tree must stay clean; `.gitignore` already excludes `solitools.exe`.
-
-### 2.4 CLI reference
+### 2.2 CLI reference
 
 Commands: `scan`, `tui`, `version`. A bare `solitools` opens the TUI when both
 stdin and stdout are real terminals; otherwise it prints usage and exits `2`, so
@@ -1229,5 +1202,4 @@ threshold inside the scanner.
    to stay quiet. A `-generic` switch would be more explicit — but one more flag.
 7. **Versioning.** The version lives only in code; there are no tags yet.
    Tag releases if this is going to be distributed.
-8. **No CI.** Verification is local. A workflow would need the same three
-   commands plus the GOCACHE reminder.
+8. **CI.** GitHub Actions CI runs `go vet`, race tests, and cross-compilation checks on push and pull requests.
