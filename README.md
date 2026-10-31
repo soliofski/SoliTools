@@ -1,5 +1,10 @@
 # SoliTools
 
+[![CI](https://github.com/soliofski/SoliTools/actions/workflows/ci.yml/badge.svg)](https://github.com/soliofski/SoliTools/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/soliofski/SoliTools?color=brightgreen)](https://github.com/soliofski/SoliTools/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/soliofski/SoliTools)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 High-accuracy web security scanner in Go, built for penetration testing and bug
 bounty work. The guiding rule: **a finding must be worth a human's time**.
 Precision beats recall at every decision point, and everything filtered out is
@@ -11,11 +16,27 @@ Architecture, maintenance notes, known traps and the design rationale live in
 > Use SoliTools only against systems you are authorized to test. It sends real
 > HTTP requests, including harmless canary payloads.
 
-## Build
+## Installation
 
-Go 1.21 or newer, no external dependencies (stdlib only, builds offline):
+### Via `go install` (Recommended)
+
+Requires Go 1.21 or newer:
 
 ```console
+go install github.com/soliofski/SoliTools/cmd/solitools@latest
+```
+
+### Precompiled Binaries
+
+Download ready-to-run binaries for Linux (`amd64`, `arm64`), macOS (`amd64`, `arm64`), and Windows (`amd64`) from the [Releases](https://github.com/soliofski/SoliTools/releases) page.
+
+### Build from Source
+
+SoliTools uses the Go standard library only (zero third-party dependencies, builds offline):
+
+```console
+git clone https://github.com/soliofski/SoliTools.git
+cd SoliTools
 go build -o solitools ./cmd/solitools
 go test ./...
 ```
